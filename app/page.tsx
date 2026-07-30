@@ -34,7 +34,7 @@ const seed: Material[] = [
     id: "linear",
     title: "線形代数学入門",
     kind: "教科書",
-    color: "#ff6b4a",
+    color: "#3b82f6",
     chapters: [
       {
         id: "l1",
@@ -66,7 +66,7 @@ const seed: Material[] = [
     id: "analysis",
     title: "解析学 I 演習",
     kind: "授業",
-    color: "#2e7d6e",
+    color: "#1764d9",
     chapters: [
       {
         id: "a1",
@@ -82,7 +82,7 @@ const seed: Material[] = [
     id: "probability",
     title: "確率・統計",
     kind: "教科書",
-    color: "#5267ad",
+    color: "#275eb7",
     chapters: [
       {
         id: "p1",
@@ -187,7 +187,7 @@ export default function Home() {
         id,
         title: newTitle.trim(),
         kind: "教科書",
-        color: "#8b5f9c",
+        color: "#6e7fbb",
         chapters: [
           {
             id: `${id}-1`,
