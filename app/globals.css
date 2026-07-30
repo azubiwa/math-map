@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap");
 @import "tailwindcss";
 
 :root {
@@ -47,7 +48,7 @@ button { color: inherit; }
 .workspace { min-width: 0; padding: 43px clamp(28px, 5vw, 76px) 70px; max-width: 1500px; width: 100%; margin: 0 auto; }
 .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 37px; }
 .eyebrow { margin: 0 0 5px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-.topbar h1 { margin: 0; font-family: Georgia, "Times New Roman", "BIZ UDPMincho", "Yu Mincho", serif; font-size: clamp(27px, 3vw, 38px); font-weight: 500; letter-spacing: -.03em; }
+.topbar h1 { margin: 0; font-family: Georgia, "Times New Roman", "BIZ UDPGothic", "Yu Gothic UI", sans-serif; font-size: clamp(27px, 3vw, 38px); font-weight: 700; letter-spacing: -.03em; }
 .top-actions { display: flex; align-items: center; gap: 10px; }
 .icon-button { border: 1px solid var(--line); background: var(--card); width: 42px; height: 42px; border-radius: 10px; cursor: pointer; font-size: 19px; }
 .primary-button { border: 0; background: var(--ink); color: white; padding: 12px 18px; border-radius: 9px; font-size: 13px; font-weight: 700; cursor: pointer; }
@@ -62,7 +63,7 @@ button { color: inherit; }
 .ring span { margin-top: 6px; font-size: 9px; color: var(--muted); }
 .overall-copy { position: relative; z-index: 1; }
 .overall-copy > p, .card-heading p { font-size: 10px; color: var(--muted); font-weight: 700; letter-spacing: .08em; margin: 0 0 8px; }
-.overall-copy h2 { font: 500 20px/1.45 Georgia, "Times New Roman", "BIZ UDPMincho", "Yu Mincho", serif; margin: 0 0 17px; }
+.overall-copy h2 { font: 700 20px/1.45 Georgia, "Times New Roman", "BIZ UDPGothic", "Yu Gothic UI", sans-serif; margin: 0 0 17px; }
 .mini-stats { display: flex; gap: 20px; font-size: 10px; color: var(--muted); }
 .mini-stats b { color: var(--ink); font: 600 15px Georgia, serif; margin-right: 3px; }
 .heat-card { padding: 23px 25px; }
@@ -80,9 +81,9 @@ button { color: inherit; }
 
 .material-head { display: grid; grid-template-columns: 1fr minmax(170px, 260px) auto; gap: 18px; align-items: end; padding: 0 2px 22px; border-bottom: 1px solid var(--line); }
 .book-title { display: flex; gap: 15px; align-items: center; }
-.book-title > span { color: white; width: 42px; height: 52px; display: grid; place-items: center; border-radius: 5px 9px 9px 5px; box-shadow: inset 5px 0 rgba(0,0,0,.12); font: 700 15px Georgia, "BIZ UDPMincho", "Yu Mincho", serif; }
+.book-title > span { color: white; width: 42px; height: 52px; display: grid; place-items: center; border-radius: 5px 9px 9px 5px; box-shadow: inset 5px 0 rgba(0,0,0,.12); font: 700 15px Georgia, "BIZ UDPGothic", "Yu Gothic UI", sans-serif; }
 .book-title p { margin: 0 0 4px; color: var(--muted); font-size: 10px; }
-.book-title h2 { margin: 0; font: 600 22px Georgia, "BIZ UDPMincho", "Yu Mincho", serif; }
+.book-title h2 { margin: 0; font: 700 22px Georgia, "BIZ UDPGothic", "Yu Gothic UI", sans-serif; }
 .material-progress { width: min(260px, 30%); }
 .material-progress > div:first-child { display: flex; justify-content: space-between; align-items: baseline; font-size: 10px; color: var(--muted); }
 .material-progress strong { color: var(--ink); font: 600 17px Georgia, serif; }
@@ -90,7 +91,7 @@ button { color: inherit; }
 .progress-track i, .chapter-pct i { display: block; height: 100%; border-radius: inherit; }
 .problem-section { padding-top: 25px; }
 .problem-toolbar { display: flex; justify-content: space-between; align-items: center; }
-.problem-toolbar h3 { margin: 0 0 4px; font: 600 17px Georgia, "BIZ UDPMincho", "Yu Mincho", serif; }
+.problem-toolbar h3 { margin: 0 0 4px; font: 700 17px Georgia, "BIZ UDPGothic", "Yu Gothic UI", sans-serif; }
 .problem-toolbar p { margin: 0; font-size: 10px; color: var(--muted); }
 .problem-toolbar select { color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 9px 30px 9px 11px; font-size: 11px; }
 .legend { display: flex; flex-wrap: wrap; gap: 15px; margin: 22px 0 13px; font-size: 9px; color: var(--muted); }
@@ -122,7 +123,7 @@ button { color: inherit; }
 
 .view-panel { min-height: 560px; }
 .view-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
-.view-heading h2 { margin: 0 0 5px; font: 600 28px Georgia, "BIZ UDPMincho", serif; }
+.view-heading h2 { margin: 0 0 5px; font: 700 28px Georgia, "BIZ UDPGothic", "Yu Gothic UI", sans-serif; }
 .view-heading > div > p:last-child { margin: 0; color: var(--muted); font-size: 11px; }
 .material-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
 .material-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
@@ -150,7 +151,7 @@ button { color: inherit; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; background: rgba(20,22,19,.48); display: grid; place-items: center; padding: 20px; backdrop-filter: blur(3px); }
 .modal { position: relative; width: min(620px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; background: var(--card); border-radius: 17px; padding: 32px; box-shadow: 0 24px 80px rgba(0,0,0,.25); }
-.modal h2 { font: 600 25px Georgia, "BIZ UDPMincho", "Yu Mincho", serif; margin: 0 0 24px; }
+.modal h2 { font: 700 25px Georgia, "BIZ UDPGothic", "Yu Gothic UI", sans-serif; margin: 0 0 24px; }
 .modal-close { position: absolute; right: 16px; top: 14px; border: 0; background: transparent; font-size: 23px; cursor: pointer; color: var(--muted); }
 .modal label { display: grid; gap: 8px; font-size: 11px; font-weight: 700; }
 .modal input, .modal select { width: 100%; border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 9px; padding: 13px 14px; outline: none; }
