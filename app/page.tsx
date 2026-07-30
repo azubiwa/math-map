@@ -12,6 +12,8 @@ type Material = {
   color: string;
   chapters: Chapter[];
 };
+type View = "home" | "materials" | "review" | "history";
+type ChapterDraft = { title: string; count: number };
 
 const statusOrder: Status[] = [
   "todo",
@@ -108,9 +110,15 @@ export default function Home() {
   const [materials, setMaterials] = useState<Material[]>(seed);
   const [selected, setSelected] = useState("linear");
   const [filter, setFilter] = useState<Status | "all">("all");
+  const [view, setView] = useState<View>("home");
   const [dark, setDark] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
+  const [newKind, setNewKind] = useState<Material["kind"]>("教科書");
+  const [chapterDrafts, setChapterDrafts] = useState<ChapterDraft[]>([
+    { title: "第1章", count: 10 },
+  ]);
 
   useEffect(() => {
     const saved = localStorage.getItem("math-map-data");
@@ -178,31 +186,81 @@ export default function Home() {
     );
   };
 
-  const addMaterial = () => {
-    if (!newTitle.trim()) return;
-    const id = `material-${Date.now()}`;
-    setMaterials((items) => [
-      ...items,
-      {
-        id,
-        title: newTitle.trim(),
-        kind: "教科書",
-        color: "#6e7fbb",
-        chapters: [
-          {
-            id: `${id}-1`,
-            title: "第1章",
-            problems: Array.from({ length: 10 }, (_, i) => ({
-              id: i + 1,
+  const openAdd = () => {
+    setEditingId(null);
+    setNewTitle("");
+    setNewKind("教科書");
+    setChapterDrafts([{ title: "第1章", count: 10 }]);
+    setAdding(true);
+  };
+
+  const openEdit = (material: Material) => {
+    setEditingId(material.id);
+    setNewTitle(material.title);
+    setNewKind(material.kind);
+    setChapterDrafts(
+      material.chapters.map((chapter) => ({
+        title: chapter.title,
+        count: chapter.problems.length,
+      })),
+    );
+    setAdding(true);
+  };
+
+  const saveMaterial = () => {
+    if (!newTitle.trim() || chapterDrafts.length === 0) return;
+    const normalized = chapterDrafts.map((chapter, index) => ({
+      title: chapter.title.trim() || `第${index + 1}章`,
+      count: Math.max(1, Math.min(500, Number(chapter.count) || 1)),
+    }));
+
+    if (editingId) {
+      setMaterials((items) =>
+        items.map((material) => {
+          if (material.id !== editingId) return material;
+          return {
+            ...material,
+            title: newTitle.trim(),
+            kind: newKind,
+            chapters: normalized.map((draft, index) => {
+              const previous = material.chapters[index];
+              return {
+                id: previous?.id ?? `${material.id}-${Date.now()}-${index}`,
+                title: draft.title,
+                problems: Array.from({ length: draft.count }, (_, problemIndex) => (
+                  previous?.problems[problemIndex] ?? {
+                    id: problemIndex + 1,
+                    status: "todo" as Status,
+                  }
+                )),
+              };
+            }),
+          };
+        }),
+      );
+    } else {
+      const id = `material-${Date.now()}`;
+      setMaterials((items) => [
+        ...items,
+        {
+          id,
+          title: newTitle.trim(),
+          kind: newKind,
+          color: "#6e7fbb",
+          chapters: normalized.map((draft, index) => ({
+            id: `${id}-${index + 1}`,
+            title: draft.title,
+            problems: Array.from({ length: draft.count }, (_, problemIndex) => ({
+              id: problemIndex + 1,
               status: "todo" as Status,
             })),
-          },
-        ],
-      },
-    ]);
-    setSelected(id);
+          })),
+        },
+      ]);
+      setSelected(id);
+      setView("home");
+    }
     setAdding(false);
-    setNewTitle("");
   };
 
   const exportData = () => {
@@ -225,10 +283,10 @@ export default function Home() {
           <span>MATH MAP</span>
         </div>
         <nav className="main-nav" aria-label="メインナビゲーション">
-          <button className="nav-item active"><span>⌂</span>ホーム</button>
-          <button className="nav-item"><span>▦</span>教材一覧</button>
-          <button className="nav-item"><span>↻</span>復習キュー <b>{review}</b></button>
-          <button className="nav-item"><span>▥</span>学習記録</button>
+          <button className={`nav-item ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}><span>⌂</span>ホーム</button>
+          <button className={`nav-item ${view === "materials" ? "active" : ""}`} onClick={() => setView("materials")}><span>▦</span>教材一覧</button>
+          <button className={`nav-item ${view === "review" ? "active" : ""}`} onClick={() => setView("review")}><span>↻</span>復習キュー <b>{review}</b></button>
+          <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}><span>▥</span>学習記録</button>
         </nav>
         <div className="side-section">
           <p>教材</p>
@@ -236,14 +294,14 @@ export default function Home() {
             <button
               key={material.id}
               className={`material-link ${selected === material.id ? "selected" : ""}`}
-              onClick={() => setSelected(material.id)}
+              onClick={() => { setSelected(material.id); setView("home"); }}
             >
               <i style={{ background: material.color }} />
               <span>{material.title}</span>
               <small>{pct(material.chapters)}%</small>
             </button>
           ))}
-          <button className="add-link" onClick={() => setAdding(true)}>＋ 教材を追加</button>
+          <button className="add-link" onClick={openAdd}>＋ 教材を追加</button>
         </div>
         <div className="side-footer">
           <button onClick={exportData}>⇩ バックアップを書き出す</button>
@@ -261,10 +319,69 @@ export default function Home() {
             <button className="icon-button" aria-label="テーマを切り替える" onClick={() => setDark((v) => !v)}>
               {dark ? "☀" : "☾"}
             </button>
-            <button className="primary-button" onClick={() => setAdding(true)}>＋ 教材を追加</button>
+            <button className="primary-button" onClick={openAdd}>＋ 教材を追加</button>
           </div>
         </header>
 
+        {view === "materials" && (
+          <section className="view-panel">
+            <div className="view-heading">
+              <div><p className="eyebrow">MATERIALS</p><h2>教材一覧</h2></div>
+              <button className="primary-button" onClick={openAdd}>＋ 教材を追加</button>
+            </div>
+            <div className="material-cards">
+              {materials.map((material) => {
+                const count = material.chapters.reduce((sum, chapter) => sum + chapter.problems.length, 0);
+                return (
+                  <article className="material-card" key={material.id}>
+                    <button className="material-open" onClick={() => { setSelected(material.id); setView("home"); }}>
+                      <span className="book-chip" style={{ background: material.color }}>{material.kind === "授業" ? "授" : "本"}</span>
+                      <div><small>{material.kind}</small><h3>{material.title}</h3><p>{material.chapters.length}章・全{count}問</p></div>
+                    </button>
+                    <div className="material-card-progress"><strong>{pct(material.chapters)}%</strong><div><i style={{ width: `${pct(material.chapters)}%`, background: material.color }} /></div></div>
+                    <button className="secondary-button" onClick={() => openEdit(material)}>章・問題数を設定</button>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {view === "review" && (
+          <section className="view-panel">
+            <div className="view-heading"><div><p className="eyebrow">REVIEW QUEUE</p><h2>復習キュー</h2><p>{review}問が復習を待っています</p></div></div>
+            <div className="review-list">
+              {materials.flatMap((material) => material.chapters.flatMap((chapter) =>
+                chapter.problems.filter((problem) => problem.status === "review").map((problem) => (
+                  <article className="review-item" key={`${material.id}-${chapter.id}-${problem.id}`}>
+                    <span className="review-number">{problem.id}</span>
+                    <div><small>{material.title}</small><h3>{chapter.title}・問題 {problem.id}</h3></div>
+                    <button className="secondary-button" onClick={() => { setSelected(material.id); setView("home"); setFilter("review"); }}>問題を開く</button>
+                  </article>
+                )),
+              ))}
+              {review === 0 && <div className="empty-state"><strong>復習待ちはありません</strong><p>問題マスを「復習待ち」にすると、ここにまとまります。</p></div>}
+            </div>
+          </section>
+        )}
+
+        {view === "history" && (
+          <section className="view-panel">
+            <div className="view-heading"><div><p className="eyebrow">STUDY LOG</p><h2>学習記録</h2><p>これまでの積み重ねを状態別に確認できます</p></div></div>
+            <div className="history-grid">
+              {statusOrder.map((status) => {
+                const count = totalProblems.filter((problem) => problem.status === status).length;
+                return <article key={status}><i className={`dot ${status}`} /><span>{statusLabel[status]}</span><strong>{count}<small>問</small></strong></article>;
+              })}
+            </div>
+            <article className="heat-card history-heat">
+              <div className="card-heading"><div><p>学習の足あと</p><h3>直近7週間</h3></div><span>23日継続中</span></div>
+              <div className="heatmap">{heat.map((level, i) => <i key={i} data-level={level} />)}</div>
+            </article>
+          </section>
+        )}
+
+        {view === "home" && (<>
         <section className="summary">
           <article className="overall-card">
             <div className="ring" style={{ "--progress": `${overall * 3.6}deg` } as React.CSSProperties}>
@@ -302,6 +419,7 @@ export default function Home() {
             <div><span>教材の進捗</span><strong>{pct(current.chapters)}%</strong></div>
             <div className="progress-track"><i style={{ width: `${pct(current.chapters)}%`, background: current.color }} /></div>
           </div>
+          <button className="secondary-button edit-material" onClick={() => openEdit(current)}>章・問題数を設定</button>
         </section>
 
         <section className="problem-section">
@@ -353,6 +471,7 @@ export default function Home() {
             })}
           </div>
         </section>
+        </>)}
       </section>
 
       {adding && (
@@ -360,10 +479,24 @@ export default function Home() {
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="add-title" onMouseDown={(e) => e.stopPropagation()}>
             <button className="modal-close" aria-label="閉じる" onClick={() => setAdding(false)}>×</button>
             <p className="eyebrow">NEW MATERIAL</p>
-            <h2 id="add-title">新しい教材を追加</h2>
-            <label>教材名<input autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addMaterial()} placeholder="例：微分積分学 演習" /></label>
-            <p className="modal-note">まず10問の第1章を作成します。問題番号を押して進捗を記録できます。</p>
-            <button className="primary-button wide" onClick={addMaterial}>教材を作成する</button>
+            <h2 id="add-title">{editingId ? "教材の構成を編集" : "新しい教材を追加"}</h2>
+            <div className="form-grid">
+              <label>教材名<input autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="例：微分積分学 演習" /></label>
+              <label>種類<select value={newKind} onChange={(e) => setNewKind(e.target.value as Material["kind"])}><option>教科書</option><option>授業</option></select></label>
+            </div>
+            <div className="chapter-editor">
+              <div className="chapter-editor-title"><strong>章と問題数</strong><button onClick={() => setChapterDrafts((items) => [...items, { title: `第${items.length + 1}章`, count: 10 }])}>＋ 章を追加</button></div>
+              {chapterDrafts.map((chapter, index) => (
+                <div className="chapter-draft" key={index}>
+                  <span>{index + 1}</span>
+                  <input aria-label={`${index + 1}章目の名前`} value={chapter.title} onChange={(e) => setChapterDrafts((items) => items.map((item, i) => i === index ? { ...item, title: e.target.value } : item))} placeholder={`第${index + 1}章`} />
+                  <label><input aria-label={`${index + 1}章目の問題数`} type="number" min="1" max="500" value={chapter.count} onChange={(e) => setChapterDrafts((items) => items.map((item, i) => i === index ? { ...item, count: Number(e.target.value) } : item))} />問</label>
+                  <button aria-label={`${index + 1}章目を削除`} disabled={chapterDrafts.length === 1} onClick={() => setChapterDrafts((items) => items.filter((_, i) => i !== index))}>×</button>
+                </div>
+              ))}
+            </div>
+            <p className="modal-note">章はあとから追加・変更できます。問題数を減らすと、末尾の問題の記録は削除されます。</p>
+            <button className="primary-button wide" onClick={saveMaterial}>{editingId ? "変更を保存する" : "教材を作成する"}</button>
           </div>
         </div>
       )}
