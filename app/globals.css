@@ -53,8 +53,9 @@ button { color: inherit; }
 .material-link.selected { background: rgba(255,255,255,.12); color: white; font-weight: 700; }
 .add-link { color: #9bb9dd; font-size: 12px; padding: 12px 10px; }
 .side-footer { margin-top: auto; padding: 18px 10px 0; border-top: 1px solid var(--line); }
-.side-footer button { font-size: 12px; font-weight: 700; }
+.side-footer button { display: block; width: 100%; padding: 5px 0; font-size: 12px; font-weight: 700; color: white; }
 .side-footer p { font-size: 9px; color: #7f96b3; margin: 8px 0 0; }
+.file-input { display: none; }
 
 .workspace { min-width: 0; padding: 43px clamp(28px, 5vw, 76px) 70px; max-width: 1500px; width: 100%; margin: 0 auto; }
 .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 37px; }
@@ -119,8 +120,11 @@ button { color: inherit; }
 .chapter-pct { width: 150px; text-align: right; }
 .chapter-pct span { font: 600 12px Georgia, serif; }
 .problem-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)); gap: 7px; margin-top: 16px; }
-.problem { height: 34px; min-width: 34px; border: 1px solid transparent; border-radius: 6px; font-size: 10px; font-weight: 700; cursor: pointer; transition: transform .15s, box-shadow .15s; }
+.problem-wrap { position: relative; min-width: 34px; }
+.problem { width: 100%; height: 34px; min-width: 34px; border: 1px solid transparent; border-radius: 6px; font-size: 10px; font-weight: 700; cursor: pointer; transition: transform .15s, box-shadow .15s; }
 .problem:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(0,0,0,.08); }
+.problem-reset { position: absolute; top: -6px; right: -5px; width: 17px; height: 17px; padding: 0; display: grid; place-items: center; border: 2px solid var(--card); border-radius: 50%; background: #17375f; color: white; font: 700 10px/1 sans-serif; cursor: pointer; opacity: 0; transition: opacity .15s; z-index: 2; }
+.problem-wrap:hover .problem-reset, .problem-reset:focus-visible { opacity: 1; }
 .todo { background: var(--paper); border-color: var(--line); color: var(--muted); }
 .trying { background: #dbeafe; color: #174c96; border: 1px dashed #3b82f6; }
 .solved { background: var(--accent); color: white; }
@@ -202,6 +206,7 @@ button { color: inherit; }
   .workspace { padding: 28px 20px 60px; }
   .summary { grid-template-columns: 1fr; }
   .history-grid { grid-template-columns: repeat(2, 1fr); }
+  .problem-reset { opacity: 1; }
 }
 
 @media (max-width: 600px) {

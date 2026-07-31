@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Status = "todo" | "trying" | "solved" | "with-answer" | "review";
-type Problem = { id: number; status: Status };
+type Problem = { id: number; status: Status; studiedOn?: string };
 type Chapter = { id: string; title: string; problems: Problem[] };
 type Material = {
   id: string;
@@ -129,6 +129,7 @@ export default function Home() {
     { title: "第1章", count: 10 },
   ]);
   const [activity, setActivity] = useState<Record<string, number>>({});
+  const importInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("math-map-data");
@@ -188,6 +189,10 @@ export default function Home() {
   );
 
   const cycleProblem = (chapterId: string, problemId: number) => {
+    const targetProblem = current.chapters
+      .find((chapter) => chapter.id === chapterId)
+      ?.problems.find((problem) => problem.id === problemId);
+    const shouldRecord = !targetProblem?.studiedOn;
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -202,22 +207,63 @@ export default function Home() {
                       problems: chapter.problems.map((problem) =>
                         problem.id !== problemId
                           ? problem
-                          : {
-                              ...problem,
-                              status:
-                                statusOrder[
-                                  (statusOrder.indexOf(problem.status) + 1) %
-                                    statusOrder.length
-                                ],
-                            },
+                          : (() => {
+                              return {
+                                ...problem,
+                                studiedOn: problem.studiedOn ?? localDateKey(),
+                                status:
+                                  statusOrder[
+                                    (statusOrder.indexOf(problem.status) + 1) %
+                                      statusOrder.length
+                                  ],
+                              };
+                            })(),
                       ),
                     },
               ),
             },
       ),
     );
-    const today = localDateKey();
-    setActivity((days) => ({ ...days, [today]: (days[today] ?? 0) + 1 }));
+    if (shouldRecord) {
+      const today = localDateKey();
+      setActivity((days) => ({ ...days, [today]: (days[today] ?? 0) + 1 }));
+    }
+  };
+
+  const resetProblem = (chapterId: string, problemId: number) => {
+    const studiedOn = current.chapters
+      .find((chapter) => chapter.id === chapterId)
+      ?.problems.find((problem) => problem.id === problemId)
+      ?.studiedOn;
+    setMaterials((items) =>
+      items.map((material) =>
+        material.id !== current.id
+          ? material
+          : {
+              ...material,
+              chapters: material.chapters.map((chapter) =>
+                chapter.id !== chapterId
+                  ? chapter
+                  : {
+                      ...chapter,
+                      problems: chapter.problems.map((problem) => {
+                        if (problem.id !== problemId) return problem;
+                        return { id: problem.id, status: "todo" as Status };
+                      }),
+                    },
+              ),
+            },
+      ),
+    );
+    if (studiedOn) {
+      setActivity((days) => {
+        const next = { ...days };
+        const remaining = Math.max(0, (next[studiedOn!] ?? 0) - 1);
+        if (remaining === 0) delete next[studiedOn!];
+        else next[studiedOn!] = remaining;
+        return next;
+      });
+    }
   };
 
   const openAdd = () => {
@@ -298,13 +344,42 @@ export default function Home() {
   };
 
   const exportData = () => {
-    const blob = new Blob([JSON.stringify(materials, null, 2)], { type: "application/json" });
+    const backup = {
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      materials,
+      activity,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = "math-map-backup.json";
     anchor.click();
     URL.revokeObjectURL(url);
+  };
+
+  const importData = async (file: File) => {
+    try {
+      const parsed = JSON.parse(await file.text());
+      const restoredMaterials = Array.isArray(parsed) ? parsed : parsed.materials;
+      if (!Array.isArray(restoredMaterials) || restoredMaterials.length === 0) {
+        throw new Error("教材データがありません");
+      }
+      setMaterials(restoredMaterials);
+      setActivity(
+        !Array.isArray(parsed) && parsed.activity && typeof parsed.activity === "object"
+          ? parsed.activity
+          : {},
+      );
+      setSelected(restoredMaterials[0].id);
+      setView("home");
+      alert("バックアップを反映しました。");
+    } catch {
+      alert("このファイルは読み込めませんでした。MATH MAPのJSONバックアップを選んでください。");
+    } finally {
+      if (importInput.current) importInput.current.value = "";
+    }
   };
 
   if (!current) return null;
@@ -339,6 +414,11 @@ export default function Home() {
         </div>
         <div className="side-footer">
           <button onClick={exportData}>⇩ バックアップを書き出す</button>
+          <button onClick={() => importInput.current?.click()}>⇧ バックアップを反映する</button>
+          <input ref={importInput} className="file-input" type="file" accept="application/json,.json" onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void importData(file);
+          }} />
           <p>データはこの端末に保存されます</p>
         </div>
       </aside>
@@ -489,15 +569,24 @@ export default function Home() {
                   </div>
                   <div className="problem-grid">
                     {chapter.problems.map((problem) => (
-                      <button
-                        key={problem.id}
-                        className={`problem ${problem.status}`}
-                        title={`${problem.id}番・${statusLabel[problem.status]}`}
-                        aria-label={`${problem.id}番、${statusLabel[problem.status]}。押すと次の状態へ`}
-                        onClick={() => cycleProblem(chapter.id, problem.id)}
-                      >
-                        {problem.id}
-                      </button>
+                      <div className="problem-wrap" key={problem.id}>
+                        <button
+                          className={`problem ${problem.status}`}
+                          title={`${problem.id}番・${statusLabel[problem.status]}`}
+                          aria-label={`${problem.id}番、${statusLabel[problem.status]}。押すと次の状態へ`}
+                          onClick={() => cycleProblem(chapter.id, problem.id)}
+                        >
+                          {problem.id}
+                        </button>
+                        {problem.status !== "todo" && (
+                          <button
+                            className="problem-reset"
+                            title={`${problem.id}番の記録を消す`}
+                            aria-label={`${problem.id}番の学習記録を消す`}
+                            onClick={() => resetProblem(chapter.id, problem.id)}
+                          >×</button>
+                        )}
+                      </div>
                     ))}
                     {chapter.problems.length === 0 && <p className="empty">この状態の問題はありません。</p>}
                   </div>
