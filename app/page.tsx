@@ -98,7 +98,16 @@ const seed: Material[] = [
   },
 ];
 
-const heat = [0, 1, 0, 2, 3, 0, 0, 1, 2, 4, 2, 0, 1, 3, 4, 1, 0, 2, 3, 1, 0, 0, 2, 4, 3, 2, 1, 0, 1, 3, 2, 0, 0, 1, 4, 3, 1, 2, 0, 0, 3, 2, 4, 1, 0, 2, 1, 3, 4];
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatHeatDate(date: Date) {
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
 
 function pct(chapters: Chapter[]) {
   const all = chapters.flatMap((c) => c.problems);
@@ -119,14 +128,19 @@ export default function Home() {
   const [chapterDrafts, setChapterDrafts] = useState<ChapterDraft[]>([
     { title: "第1章", count: 10 },
   ]);
+  const [activity, setActivity] = useState<Record<string, number>>({});
 
   useEffect(() => {
     const saved = localStorage.getItem("math-map-data");
     const savedTheme = localStorage.getItem("math-map-theme");
+    const savedActivity = localStorage.getItem("math-map-activity");
     if (saved) {
       try { setMaterials(JSON.parse(saved)); } catch {}
     }
     if (savedTheme === "dark") setDark(true);
+    if (savedActivity) {
+      try { setActivity(JSON.parse(savedActivity)); } catch {}
+    }
   }, []);
 
   useEffect(() => {
@@ -137,11 +151,29 @@ export default function Home() {
     localStorage.setItem("math-map-theme", dark ? "dark" : "light");
   }, [dark]);
 
+  useEffect(() => {
+    localStorage.setItem("math-map-activity", JSON.stringify(activity));
+  }, [activity]);
+
   const current = materials.find((m) => m.id === selected) ?? materials[0];
   const totalProblems = materials.flatMap((m) => m.chapters.flatMap((c) => c.problems));
   const solved = totalProblems.filter((p) => p.status === "solved" || p.status === "with-answer").length;
   const review = totalProblems.filter((p) => p.status === "review").length;
   const overall = totalProblems.length ? Math.round((solved / totalProblems.length) * 100) : 0;
+  const heatDays = useMemo(() => {
+    const today = new Date();
+    return Array.from({ length: 49 }, (_, index) => {
+      const date = new Date(today);
+      date.setHours(12, 0, 0, 0);
+      date.setDate(today.getDate() - (48 - index));
+      const key = localDateKey(date);
+      const count = activity[key] ?? 0;
+      const level = count === 0 ? 0 : count <= 2 ? 1 : count <= 5 ? 2 : count <= 9 ? 3 : 4;
+      return { key, date, count, level };
+    });
+  }, [activity]);
+  const activeDays = heatDays.filter((day) => day.count > 0).length;
+  const todayCount = activity[localDateKey()] ?? 0;
 
   const filteredChapters = useMemo(
     () =>
@@ -184,6 +216,8 @@ export default function Home() {
             },
       ),
     );
+    const today = localDateKey();
+    setActivity((days) => ({ ...days, [today]: (days[today] ?? 0) + 1 }));
   };
 
   const openAdd = () => {
@@ -375,8 +409,9 @@ export default function Home() {
               })}
             </div>
             <article className="heat-card history-heat">
-              <div className="card-heading"><div><p>学習の足あと</p><h3>直近7週間</h3></div><span>23日継続中</span></div>
-              <div className="heatmap">{heat.map((level, i) => <i key={i} data-level={level} />)}</div>
+              <div className="card-heading"><div><p>学習の足あと</p><h3>直近7週間</h3></div><span>今日 {todayCount}問</span></div>
+              <div className="heatmap">{heatDays.map((day) => <i key={day.key} data-level={day.level} title={`${formatHeatDate(day.date)}・${day.count}問`} />)}</div>
+              <div className="heat-foot"><span>直近49日で{activeDays}日学習</span><div className="heat-legend"><span>少ない</span>{[0,1,2,3,4].map((v) => <i key={v} data-level={v} />)}<span>多い</span></div></div>
             </article>
           </section>
         )}
@@ -401,12 +436,12 @@ export default function Home() {
           <article className="heat-card">
             <div className="card-heading">
               <div><p>学習の足あと</p><h3>直近7週間</h3></div>
-              <span>23日継続中</span>
+              <span>今日 {todayCount}問</span>
             </div>
             <div className="heatmap" aria-label="学習ヒートマップ">
-              {heat.map((level, i) => <i key={i} data-level={level} title={`${i + 1}日目・学習レベル${level}`} />)}
+              {heatDays.map((day) => <i key={day.key} data-level={day.level} title={`${formatHeatDate(day.date)}・${day.count}問`} />)}
             </div>
-            <div className="heat-legend"><span>少ない</span>{[0,1,2,3,4].map((v) => <i key={v} data-level={v} />)}<span>多い</span></div>
+            <div className="heat-foot"><span>直近49日で{activeDays}日学習</span><div className="heat-legend"><span>少ない</span>{[0,1,2,3,4].map((v) => <i key={v} data-level={v} />)}<span>多い</span></div></div>
           </article>
         </section>
 
