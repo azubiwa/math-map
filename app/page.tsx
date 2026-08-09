@@ -149,48 +149,58 @@ export default function Home() {
   const [activity, setActivity] = useState<Record<string, number>>({});
   const [goals, setGoals] = useState<Goals>({ weekly: 20, monthly: 80 });
   const [exam, setExam] = useState<ExamSettings>({ enabled: false, name: "", date: "", materialId: "linear" });
+  const [restored, setRestored] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem("math-map-data");
-    const savedTheme = localStorage.getItem("math-map-theme");
-    const savedActivity = localStorage.getItem("math-map-activity");
-    const savedGoals = localStorage.getItem("math-map-goals");
-    const savedExam = localStorage.getItem("math-map-exam");
-    if (saved) {
-      try { setMaterials(JSON.parse(saved)); } catch {}
-    }
-    if (savedTheme === "dark") setDark(true);
-    if (savedActivity) {
-      try { setActivity(JSON.parse(savedActivity)); } catch {}
-    }
-    if (savedGoals) {
-      try { setGoals(JSON.parse(savedGoals)); } catch {}
-    }
-    if (savedExam) {
-      try { setExam(JSON.parse(savedExam)); } catch {}
-    }
+    const restoreTimer = window.setTimeout(() => {
+      const saved = localStorage.getItem("math-map-data");
+      const savedTheme = localStorage.getItem("math-map-theme");
+      const savedActivity = localStorage.getItem("math-map-activity");
+      const savedGoals = localStorage.getItem("math-map-goals");
+      const savedExam = localStorage.getItem("math-map-exam");
+      if (saved) {
+        try { setMaterials(JSON.parse(saved)); } catch {}
+      }
+      if (savedTheme === "dark") setDark(true);
+      if (savedActivity) {
+        try { setActivity(JSON.parse(savedActivity)); } catch {}
+      }
+      if (savedGoals) {
+        try { setGoals(JSON.parse(savedGoals)); } catch {}
+      }
+      if (savedExam) {
+        try { setExam(JSON.parse(savedExam)); } catch {}
+      }
+      setRestored(true);
+    }, 0);
+    return () => window.clearTimeout(restoreTimer);
   }, []);
 
   useEffect(() => {
+    if (!restored) return;
     localStorage.setItem("math-map-data", JSON.stringify(materials));
-  }, [materials]);
+  }, [materials, restored]);
 
   useEffect(() => {
+    if (!restored) return;
     localStorage.setItem("math-map-theme", dark ? "dark" : "light");
-  }, [dark]);
+  }, [dark, restored]);
 
   useEffect(() => {
+    if (!restored) return;
     localStorage.setItem("math-map-activity", JSON.stringify(activity));
-  }, [activity]);
+  }, [activity, restored]);
 
   useEffect(() => {
+    if (!restored) return;
     localStorage.setItem("math-map-goals", JSON.stringify(goals));
-  }, [goals]);
+  }, [goals, restored]);
 
   useEffect(() => {
+    if (!restored) return;
     localStorage.setItem("math-map-exam", JSON.stringify(exam));
-  }, [exam]);
+  }, [exam, restored]);
 
   const activeMaterials = materials.filter((material) => !material.archived);
   const archivedMaterials = materials.filter((material) => material.archived);
@@ -241,17 +251,13 @@ export default function Home() {
   const daysUntilExam = exam.date ? Math.ceil((new Date(`${exam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
   const dateLabel = new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long", day: "numeric", weekday: "long" }).format(now);
 
-  const filteredChapters = useMemo(
-    () =>
-      current?.chapters.map((chapter) => ({
-        ...chapter,
-        problems:
-          filter === "all"
-            ? chapter.problems
-            : chapter.problems.filter((problem) => problem.status === filter),
-      })) ?? [],
-    [current, filter],
-  );
+  const filteredChapters = current?.chapters.map((chapter) => ({
+    ...chapter,
+    problems:
+      filter === "all"
+        ? chapter.problems
+        : chapter.problems.filter((problem) => problem.status === filter),
+  })) ?? [];
 
   const cycleProblem = (chapterId: string, problemId: number) => {
     const targetProblem = current.chapters
