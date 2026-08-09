@@ -11,9 +11,12 @@ type Material = {
   kind: "教科書" | "授業";
   color: string;
   chapters: Chapter[];
+  archived?: boolean;
 };
-type View = "home" | "materials" | "review" | "history";
+type View = "home" | "materials" | "review" | "history" | "goals" | "exam";
 type ChapterDraft = { title: string; count: number };
+type Goals = { weekly: number; monthly: number };
+type ExamSettings = { enabled: boolean; name: string; date: string; materialId: string };
 
 const statusOrder: Status[] = [
   "todo",
@@ -109,6 +112,21 @@ function formatHeatDate(date: Date) {
   return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
+function startOfWeek(date = new Date()) {
+  const start = new Date(date);
+  const day = start.getDay();
+  start.setHours(12, 0, 0, 0);
+  start.setDate(start.getDate() - (day === 0 ? 6 : day - 1));
+  return start;
+}
+
+function sumActivity(activity: Record<string, number>, from: Date, to: Date) {
+  return Object.entries(activity).reduce((sum, [key, count]) => {
+    const date = new Date(`${key}T12:00:00`);
+    return date >= from && date <= to ? sum + count : sum;
+  }, 0);
+}
+
 function pct(chapters: Chapter[]) {
   const all = chapters.flatMap((c) => c.problems);
   const done = all.filter((p) => p.status === "solved" || p.status === "with-answer").length;
@@ -129,18 +147,28 @@ export default function Home() {
     { title: "第1章", count: 10 },
   ]);
   const [activity, setActivity] = useState<Record<string, number>>({});
+  const [goals, setGoals] = useState<Goals>({ weekly: 20, monthly: 80 });
+  const [exam, setExam] = useState<ExamSettings>({ enabled: false, name: "", date: "", materialId: "linear" });
   const importInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("math-map-data");
     const savedTheme = localStorage.getItem("math-map-theme");
     const savedActivity = localStorage.getItem("math-map-activity");
+    const savedGoals = localStorage.getItem("math-map-goals");
+    const savedExam = localStorage.getItem("math-map-exam");
     if (saved) {
       try { setMaterials(JSON.parse(saved)); } catch {}
     }
     if (savedTheme === "dark") setDark(true);
     if (savedActivity) {
       try { setActivity(JSON.parse(savedActivity)); } catch {}
+    }
+    if (savedGoals) {
+      try { setGoals(JSON.parse(savedGoals)); } catch {}
+    }
+    if (savedExam) {
+      try { setExam(JSON.parse(savedExam)); } catch {}
     }
   }, []);
 
@@ -156,8 +184,18 @@ export default function Home() {
     localStorage.setItem("math-map-activity", JSON.stringify(activity));
   }, [activity]);
 
-  const current = materials.find((m) => m.id === selected) ?? materials[0];
-  const totalProblems = materials.flatMap((m) => m.chapters.flatMap((c) => c.problems));
+  useEffect(() => {
+    localStorage.setItem("math-map-goals", JSON.stringify(goals));
+  }, [goals]);
+
+  useEffect(() => {
+    localStorage.setItem("math-map-exam", JSON.stringify(exam));
+  }, [exam]);
+
+  const activeMaterials = materials.filter((material) => !material.archived);
+  const archivedMaterials = materials.filter((material) => material.archived);
+  const current = materials.find((m) => m.id === selected) ?? activeMaterials[0] ?? materials[0];
+  const totalProblems = activeMaterials.flatMap((m) => m.chapters.flatMap((c) => c.problems));
   const solved = totalProblems.filter((p) => p.status === "solved" || p.status === "with-answer").length;
   const review = totalProblems.filter((p) => p.status === "review").length;
   const overall = totalProblems.length ? Math.round((solved / totalProblems.length) * 100) : 0;
@@ -175,6 +213,33 @@ export default function Home() {
   }, [activity]);
   const activeDays = heatDays.filter((day) => day.count > 0).length;
   const todayCount = activity[localDateKey()] ?? 0;
+  const now = new Date();
+  const weekStart = startOfWeek(now);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 12);
+  const weekCount = sumActivity(activity, weekStart, now);
+  const monthCount = sumActivity(activity, monthStart, now);
+  const goalPercent = (count: number, target: number) => target > 0 ? Math.min(100, Math.round((count / target) * 100)) : 0;
+  const streak = useMemo(() => {
+    const cursor = new Date();
+    cursor.setHours(12, 0, 0, 0);
+    if (!(activity[localDateKey(cursor)] > 0)) cursor.setDate(cursor.getDate() - 1);
+    let days = 0;
+    while (activity[localDateKey(cursor)] > 0) {
+      days += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    return days;
+  }, [activity]);
+  const milestoneSteps = [10, 25, 50, 100, 250, 500];
+  const unlockedMilestones = milestoneSteps.filter((step) => solved >= step);
+  const completedMaterials = activeMaterials.filter((material) => pct(material.chapters) === 100).length;
+  const nextMilestone = milestoneSteps.find((step) => solved < step);
+  const examMaterial = activeMaterials.find((material) => material.id === exam.materialId) ?? activeMaterials[0];
+  const examProblems = examMaterial?.chapters.flatMap((chapter) => chapter.problems) ?? [];
+  const examSolved = examProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
+  const examReview = examProblems.filter((problem) => problem.status === "review").length;
+  const daysUntilExam = exam.date ? Math.ceil((new Date(`${exam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
+  const dateLabel = new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long", day: "numeric", weekday: "long" }).format(now);
 
   const filteredChapters = useMemo(
     () =>
@@ -343,12 +408,33 @@ export default function Home() {
     setAdding(false);
   };
 
+  const moveMaterial = (id: string, direction: -1 | 1) => {
+    setMaterials((items) => {
+      const index = items.findIndex((item) => item.id === id);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= items.length) return items;
+      const next = [...items];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const toggleArchive = (id: string) => {
+    setMaterials((items) => items.map((item) => item.id === id ? { ...item, archived: !item.archived } : item));
+    if (id === selected) {
+      const replacement = activeMaterials.find((item) => item.id !== id);
+      if (replacement) setSelected(replacement.id);
+    }
+  };
+
   const exportData = () => {
     const backup = {
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
+      goals,
+      exam,
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -372,6 +458,8 @@ export default function Home() {
           ? parsed.activity
           : {},
       );
+      if (!Array.isArray(parsed) && parsed.goals) setGoals(parsed.goals);
+      if (!Array.isArray(parsed) && parsed.exam) setExam(parsed.exam);
       setSelected(restoredMaterials[0].id);
       setView("home");
       alert("バックアップを反映しました。");
@@ -396,10 +484,12 @@ export default function Home() {
           <button className={`nav-item ${view === "materials" ? "active" : ""}`} onClick={() => setView("materials")}><span>▦</span>教材一覧</button>
           <button className={`nav-item ${view === "review" ? "active" : ""}`} onClick={() => setView("review")}><span>↻</span>復習キュー <b>{review}</b></button>
           <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}><span>▥</span>学習記録</button>
+          <button className={`nav-item ${view === "goals" ? "active" : ""}`} onClick={() => setView("goals")}><span>◎</span>目標・実績</button>
+          <button className={`nav-item ${view === "exam" ? "active" : ""}`} onClick={() => setView("exam")}><span>旗</span>試験モード</button>
         </nav>
         <div className="side-section">
           <p>教材</p>
-          {materials.map((material) => (
+          {activeMaterials.map((material) => (
             <button
               key={material.id}
               className={`material-link ${selected === material.id ? "selected" : ""}`}
@@ -426,7 +516,7 @@ export default function Home() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">2026年7月30日・木曜日</p>
+            <p className="eyebrow">{dateLabel}</p>
             <h1>おかえりなさい。</h1>
           </div>
           <div className="top-actions">
@@ -444,8 +534,9 @@ export default function Home() {
               <button className="primary-button" onClick={openAdd}>＋ 教材を追加</button>
             </div>
             <div className="material-cards">
-              {materials.map((material) => {
+              {activeMaterials.map((material) => {
                 const count = material.chapters.reduce((sum, chapter) => sum + chapter.problems.length, 0);
+                const sourceIndex = materials.findIndex((item) => item.id === material.id);
                 return (
                   <article className="material-card" key={material.id}>
                     <button className="material-open" onClick={() => { setSelected(material.id); setView("home"); }}>
@@ -453,11 +544,29 @@ export default function Home() {
                       <div><small>{material.kind}</small><h3>{material.title}</h3><p>{material.chapters.length}章・全{count}問</p></div>
                     </button>
                     <div className="material-card-progress"><strong>{pct(material.chapters)}%</strong><div><i style={{ width: `${pct(material.chapters)}%`, background: material.color }} /></div></div>
-                    <button className="secondary-button" onClick={() => openEdit(material)}>章・問題数を設定</button>
+                    <div className="material-actions">
+                      <button className="secondary-button" onClick={() => moveMaterial(material.id, -1)} disabled={sourceIndex === 0} aria-label={`${material.title}を上へ移動`}>↑</button>
+                      <button className="secondary-button" onClick={() => moveMaterial(material.id, 1)} disabled={sourceIndex === materials.length - 1} aria-label={`${material.title}を下へ移動`}>↓</button>
+                      <button className="secondary-button action-wide" onClick={() => openEdit(material)}>章・問題数を設定</button>
+                      <button className="secondary-button" disabled={activeMaterials.length === 1} title={activeMaterials.length === 1 ? "使用中の教材を1件以上残してください" : ""} onClick={() => toggleArchive(material.id)}>アーカイブ</button>
+                    </div>
                   </article>
                 );
               })}
             </div>
+            {archivedMaterials.length > 0 && (
+              <section className="archive-section">
+                <div className="archive-heading"><h3>アーカイブ済み</h3><span>{archivedMaterials.length}件</span></div>
+                <div className="archive-list">
+                  {archivedMaterials.map((material) => (
+                    <article key={material.id}>
+                      <div><small>{material.kind}</small><strong>{material.title}</strong></div>
+                      <button className="secondary-button" onClick={() => toggleArchive(material.id)}>元に戻す</button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
           </section>
         )}
 
@@ -465,7 +574,7 @@ export default function Home() {
           <section className="view-panel">
             <div className="view-heading"><div><p className="eyebrow">REVIEW QUEUE</p><h2>復習キュー</h2><p>{review}問が復習を待っています</p></div></div>
             <div className="review-list">
-              {materials.flatMap((material) => material.chapters.flatMap((chapter) =>
+              {activeMaterials.flatMap((material) => material.chapters.flatMap((chapter) =>
                 chapter.problems.filter((problem) => problem.status === "review").map((problem) => (
                   <article className="review-item" key={`${material.id}-${chapter.id}-${problem.id}`}>
                     <span className="review-number">{problem.id}</span>
@@ -496,6 +605,66 @@ export default function Home() {
           </section>
         )}
 
+        {view === "goals" && (
+          <section className="view-panel">
+            <div className="view-heading"><div><p className="eyebrow">GOALS & MILESTONES</p><h2>目標・実績</h2><p>無理のない目標を決めて、積み重ねを確認できます</p></div></div>
+            <div className="goal-layout">
+              <article className="settings-card">
+                <p className="eyebrow">STUDY GOALS</p>
+                <h3>学習目標</h3>
+                <div className="goal-inputs">
+                  <label>週間目標<div><input type="number" min="1" max="999" value={goals.weekly} onChange={(event) => setGoals((value) => ({ ...value, weekly: Math.max(1, Number(event.target.value) || 1) }))} /><span>問</span></div></label>
+                  <label>月間目標<div><input type="number" min="1" max="9999" value={goals.monthly} onChange={(event) => setGoals((value) => ({ ...value, monthly: Math.max(1, Number(event.target.value) || 1) }))} /><span>問</span></div></label>
+                </div>
+                <div className="goal-detail">
+                  <div><span>今週</span><strong>{weekCount} / {goals.weekly}問</strong></div>
+                  <div className="goal-track"><i style={{ width: `${goalPercent(weekCount, goals.weekly)}%` }} /></div>
+                  <div><span>今月</span><strong>{monthCount} / {goals.monthly}問</strong></div>
+                  <div className="goal-track"><i style={{ width: `${goalPercent(monthCount, goals.monthly)}%` }} /></div>
+                </div>
+              </article>
+              <article className="streak-card">
+                <span className="streak-icon">✦</span>
+                <p>現在の連続学習</p>
+                <strong>{streak}<small>日</small></strong>
+                <span>{streak > 0 ? "今日も一歩ずつ続けよう" : "今日1問解くとスタート"}</span>
+              </article>
+            </div>
+            <section className="milestone-section">
+              <div className="section-heading"><div><p className="eyebrow">MILESTONES</p><h3>マイルストーン</h3></div>{nextMilestone && <span>次は {nextMilestone}問まであと{nextMilestone - solved}問</span>}</div>
+              <div className="milestone-grid">
+                {milestoneSteps.map((step) => {
+                  const unlocked = solved >= step;
+                  return <article className={unlocked ? "unlocked" : ""} key={step}><span>{unlocked ? "✓" : "◇"}</span><strong>{step}問 解決</strong><small>{unlocked ? "達成しました" : `${Math.min(solved, step)} / ${step}問`}</small></article>;
+                })}
+                <article className={completedMaterials > 0 ? "unlocked" : ""}><span>{completedMaterials > 0 ? "✓" : "◇"}</span><strong>教材を完走</strong><small>{completedMaterials > 0 ? `${completedMaterials}冊達成` : "最初の1冊を100%へ"}</small></article>
+              </div>
+            </section>
+          </section>
+        )}
+
+        {view === "exam" && (
+          <section className="view-panel">
+            <div className="view-heading"><div><p className="eyebrow">EXAM MODE</p><h2>試験モード</h2><p>試験日と範囲を決めて、残りの学習を絞り込みます</p></div></div>
+            <div className="exam-layout">
+              <article className="settings-card exam-settings">
+                <label className="switch-row"><span><strong>試験モード</strong><small>ホームにも残り日数を表示します</small></span><input type="checkbox" checked={exam.enabled} onChange={(event) => setExam((value) => ({ ...value, enabled: event.target.checked }))} /></label>
+                <label>試験名<input value={exam.name} onChange={(event) => setExam((value) => ({ ...value, name: event.target.value }))} placeholder="例：線形代数学 中間試験" /></label>
+                <label>試験日<input type="date" value={exam.date} onChange={(event) => setExam((value) => ({ ...value, date: event.target.value }))} /></label>
+                <label>対象教材<select value={exam.materialId} onChange={(event) => setExam((value) => ({ ...value, materialId: event.target.value }))}>{activeMaterials.map((material) => <option value={material.id} key={material.id}>{material.title}</option>)}</select></label>
+              </article>
+              <article className="exam-summary">
+                <p>{exam.name.trim() || "試験名を設定してください"}</p>
+                <strong>{daysUntilExam === null ? "—" : daysUntilExam >= 0 ? `あと${daysUntilExam}日` : `${Math.abs(daysUntilExam)}日前`}</strong>
+                <span>{examMaterial?.title ?? "対象教材なし"}</span>
+                <div className="exam-stats"><div><b>{examSolved}</b><small>解決済み</small></div><div><b>{Math.max(0, examProblems.length - examSolved)}</b><small>未解決</small></div><div><b>{examReview}</b><small>復習待ち</small></div></div>
+                <div className="goal-track"><i style={{ width: `${examProblems.length ? Math.round((examSolved / examProblems.length) * 100) : 0}%` }} /></div>
+                {examMaterial && <button className="primary-button" onClick={() => { setSelected(examMaterial.id); setView("home"); }}>対象教材を開く</button>}
+              </article>
+            </div>
+          </section>
+        )}
+
         {view === "home" && (<>
         <section className="summary">
           <article className="overall-card">
@@ -508,7 +677,7 @@ export default function Home() {
               <div className="mini-stats">
                 <span><b>{solved}</b> 解決済み</span>
                 <span><b>{review}</b> 復習待ち</span>
-                <span><b>{materials.length}</b> 教材</span>
+                <span><b>{activeMaterials.length}</b> 教材</span>
               </div>
             </div>
           </article>
@@ -523,6 +692,13 @@ export default function Home() {
             </div>
             <div className="heat-foot"><span>直近49日で{activeDays}日学習</span><div className="heat-legend"><span>少ない</span>{[0,1,2,3,4].map((v) => <i key={v} data-level={v} />)}<span>多い</span></div></div>
           </article>
+        </section>
+
+        <section className="quick-stats" aria-label="目標と実績">
+          <button onClick={() => setView("goals")}><span>今週の目標</span><strong>{weekCount}<small> / {goals.weekly}問</small></strong><i><b style={{ width: `${goalPercent(weekCount, goals.weekly)}%` }} /></i></button>
+          <button onClick={() => setView("goals")}><span>連続学習</span><strong>{streak}<small>日</small></strong><em>自己ベストを伸ばそう</em></button>
+          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{unlockedMilestones.length + (completedMaterials > 0 ? 1 : 0)}<small>個獲得</small></strong><em>{nextMilestone ? `次は${nextMilestone}問` : "すべて達成"}</em></button>
+          {exam.enabled && <button className="exam-quick" onClick={() => setView("exam")}><span>{exam.name.trim() || "試験モード"}</span><strong>{daysUntilExam === null ? "日付未設定" : daysUntilExam >= 0 ? `あと${daysUntilExam}日` : "試験終了"}</strong><em>{examMaterial?.title}</em></button>}
         </section>
 
         <section className="material-head">
