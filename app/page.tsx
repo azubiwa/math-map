@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Status = "todo" | "trying" | "solved" | "with-answer" | "review";
-type Problem = { id: number; status: Status; studiedOn?: string };
+type ProblemState = { status: Status; studiedOn?: string };
+type Problem = ProblemState & { id: number; rounds?: Record<string, ProblemState> };
 type Chapter = { id: string; title: string; problems: Problem[] };
 type Material = {
   id: string;
@@ -12,11 +13,23 @@ type Material = {
   color: string;
   chapters: Chapter[];
   archived?: boolean;
+  roundCount?: number;
+  activeRound?: number;
 };
 type View = "home" | "materials" | "review" | "history" | "goals" | "exam";
 type ChapterDraft = { title: string; count: number };
 type Goals = { weekly: number; monthly: number };
-type ExamSettings = { enabled: boolean; name: string; date: string; materialId: string };
+type ExamSettings = { id: string; enabled: boolean; name: string; date: string; materialId: string; round?: number };
+type PointAward = { key: string; points: number; label: string; earnedOn: string };
+
+const streakBonuses: Record<number, number> = {
+  3: 3,
+  7: 10,
+  14: 25,
+  30: 60,
+  60: 150,
+  100: 300,
+};
 
 const statusOrder: Status[] = [
   "todo",
@@ -127,10 +140,132 @@ function sumActivity(activity: Record<string, number>, from: Date, to: Date) {
   }, 0);
 }
 
-function pct(chapters: Chapter[]) {
+function getRoundCount(material: Material) {
+  return Math.max(1, material.roundCount ?? 1);
+}
+
+function getActiveRound(material: Material) {
+  return Math.min(getRoundCount(material), Math.max(1, material.activeRound ?? 1));
+}
+
+function getProblemState(problem: Problem, round: number): ProblemState {
+  if (round === 1) return { status: problem.status, studiedOn: problem.studiedOn };
+  return problem.rounds?.[String(round)] ?? { status: "todo" };
+}
+
+function withProblemState(problem: Problem, round: number, state: ProblemState): Problem {
+  if (round === 1) return { ...problem, ...state };
+  return { ...problem, rounds: { ...problem.rounds, [String(round)]: state } };
+}
+
+function pct(chapters: Chapter[], round = 1) {
   const all = chapters.flatMap((c) => c.problems);
-  const done = all.filter((p) => p.status === "solved" || p.status === "with-answer").length;
+  const done = all.filter((problem) => {
+    const state = getProblemState(problem, round);
+    return state.status === "solved" || state.status === "with-answer";
+  }).length;
   return all.length ? Math.round((done / all.length) * 100) : 0;
+}
+
+function studiedDays(activity: Record<string, number>) {
+  return Object.entries(activity).filter(([, count]) => count > 0).map(([date]) => date);
+}
+
+function isSolvedStatus(status: Status) {
+  return status === "solved" || status === "with-answer";
+}
+
+function normalizePointDays(days: unknown) {
+  if (!Array.isArray(days)) return [];
+  return [...new Set(days.filter((day): day is string => typeof day === "string"))].sort();
+}
+
+function streakFromDays(days: string[], date = new Date()) {
+  const studied = new Set(days);
+  const cursor = new Date(date);
+  cursor.setHours(12, 0, 0, 0);
+  if (!studied.has(localDateKey(cursor))) cursor.setDate(cursor.getDate() - 1);
+  let streak = 0;
+  while (studied.has(localDateKey(cursor))) {
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+function longestStreak(days: string[]) {
+  const sortedDays = normalizePointDays(days);
+  let longest = 0;
+  let current = 0;
+  let previous: Date | null = null;
+  sortedDays.forEach((day) => {
+    const date = new Date(`${day}T12:00:00`);
+    const consecutive = previous && Math.round((date.getTime() - previous.getTime()) / 86400000) === 1;
+    current = consecutive ? current + 1 : 1;
+    longest = Math.max(longest, current);
+    previous = date;
+  });
+  return longest;
+}
+
+function validPointAwards(value: unknown): PointAward[] | null {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set<string>();
+  return value.filter((award): award is PointAward => {
+    if (!award || typeof award !== "object") return false;
+    const candidate = award as Partial<PointAward>;
+    const valid = typeof candidate.key === "string"
+      && typeof candidate.points === "number"
+      && candidate.points >= 0
+      && typeof candidate.label === "string"
+      && typeof candidate.earnedOn === "string";
+    if (!valid || seen.has(candidate.key!)) return false;
+    seen.add(candidate.key!);
+    return true;
+  });
+}
+
+function migratePointAwards(materials: Material[], pointDays: string[], legacyPoints = 0) {
+  const awards: PointAward[] = pointDays.map((day) => ({
+    key: `daily:${day}`,
+    points: 5,
+    label: "今日の初学習",
+    earnedOn: day,
+  }));
+
+  materials.forEach((material) => {
+    Array.from({ length: getRoundCount(material) }, (_, index) => index + 1).forEach((round) => {
+      material.chapters.forEach((chapter) => {
+        chapter.problems.forEach((problem) => {
+          const state = getProblemState(problem, round);
+          const awardId = `${material.id}:${round}:${chapter.id}:${problem.id}`;
+          const earnedOn = state.studiedOn ?? localDateKey();
+          if (state.studiedOn || state.status !== "todo") {
+            awards.push({ key: `start:${awardId}`, points: 1, label: "新しい問題に着手", earnedOn });
+          }
+          if (isSolvedStatus(state.status) || state.status === "review") {
+            awards.push({ key: `solve:${awardId}`, points: 2, label: "問題を解決", earnedOn });
+          }
+        });
+      });
+      if (pct(material.chapters, round) === 100) {
+        awards.push({ key: `complete:${material.id}:${round}`, points: 50, label: `${material.title} 第${round}周を完走`, earnedOn: localDateKey() });
+      }
+    });
+  });
+
+  const bestStreak = longestStreak(pointDays);
+  Object.entries(streakBonuses).forEach(([days, points]) => {
+    if (bestStreak >= Number(days)) {
+      awards.push({ key: `streak:${days}`, points, label: `${days}日連続学習`, earnedOn: localDateKey() });
+    }
+  });
+
+  const migratedTotal = awards.reduce((sum, award) => sum + award.points, 0);
+  if (legacyPoints > migratedTotal) {
+    awards.push({ key: "legacy", points: legacyPoints - migratedTotal, label: "以前のポイント", earnedOn: localDateKey() });
+  }
+  return awards;
 }
 
 export default function Home() {
@@ -148,7 +283,10 @@ export default function Home() {
   ]);
   const [activity, setActivity] = useState<Record<string, number>>({});
   const [goals, setGoals] = useState<Goals>({ weekly: 20, monthly: 80 });
-  const [exam, setExam] = useState<ExamSettings>({ enabled: false, name: "", date: "", materialId: "linear" });
+  const [exams, setExams] = useState<ExamSettings[]>([]);
+  const [pointAwards, setPointAwards] = useState<PointAward[]>([]);
+  const [pointDays, setPointDays] = useState<string[]>([]);
+  const [pointToast, setPointToast] = useState("");
   const [restored, setRestored] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
 
@@ -159,19 +297,47 @@ export default function Home() {
       const savedActivity = localStorage.getItem("math-map-activity");
       const savedGoals = localStorage.getItem("math-map-goals");
       const savedExam = localStorage.getItem("math-map-exam");
+      const savedPoints = localStorage.getItem("math-map-points");
+      const savedPointDays = localStorage.getItem("math-map-point-days");
+      const savedPointAwards = localStorage.getItem("math-map-point-awards");
+      let restoredMaterials = seed;
+      let restoredActivity: Record<string, number> = {};
       if (saved) {
-        try { setMaterials(JSON.parse(saved)); } catch {}
+        try {
+          restoredMaterials = JSON.parse(saved);
+          setMaterials(restoredMaterials);
+        } catch {}
       }
       if (savedTheme === "dark") setDark(true);
       if (savedActivity) {
-        try { setActivity(JSON.parse(savedActivity)); } catch {}
+        try {
+          restoredActivity = JSON.parse(savedActivity);
+          setActivity(restoredActivity);
+        } catch {}
       }
       if (savedGoals) {
         try { setGoals(JSON.parse(savedGoals)); } catch {}
       }
       if (savedExam) {
-        try { setExam(JSON.parse(savedExam)); } catch {}
+        try {
+          const parsedExam = JSON.parse(savedExam);
+          setExams(Array.isArray(parsedExam) ? parsedExam : [{ ...parsedExam, id: "exam-migrated" }]);
+        } catch {}
       }
+      let restoredPointDays = studiedDays(restoredActivity);
+      if (savedPointDays) {
+        try { restoredPointDays = normalizePointDays(JSON.parse(savedPointDays)); } catch {}
+      }
+      restoredPointDays = normalizePointDays(restoredPointDays);
+      setPointDays(restoredPointDays);
+      let restoredPointAwards: PointAward[] | null = null;
+      if (savedPointAwards) {
+        try { restoredPointAwards = validPointAwards(JSON.parse(savedPointAwards)); } catch {}
+      }
+      const hasSavedProgress = Boolean(saved || savedActivity || savedPointDays || savedPoints);
+      setPointAwards(restoredPointAwards ?? (hasSavedProgress ? migratePointAwards(restoredMaterials, restoredPointDays, Math.max(0, Number(savedPoints) || 0)) : []));
+      localStorage.removeItem("math-map-xp");
+      localStorage.removeItem("math-map-points");
       setRestored(true);
     }, 0);
     return () => window.clearTimeout(restoreTimer);
@@ -199,16 +365,39 @@ export default function Home() {
 
   useEffect(() => {
     if (!restored) return;
-    localStorage.setItem("math-map-exam", JSON.stringify(exam));
-  }, [exam, restored]);
+    localStorage.setItem("math-map-exam", JSON.stringify(exams));
+  }, [exams, restored]);
+
+  useEffect(() => {
+    if (!restored) return;
+    localStorage.setItem("math-map-point-awards", JSON.stringify(pointAwards));
+    localStorage.setItem("math-map-point-days", JSON.stringify(pointDays));
+  }, [pointAwards, pointDays, restored]);
+
+  useEffect(() => {
+    if (!pointToast) return;
+    const timer = window.setTimeout(() => setPointToast(""), 2400);
+    return () => window.clearTimeout(timer);
+  }, [pointToast]);
 
   const activeMaterials = materials.filter((material) => !material.archived);
   const archivedMaterials = materials.filter((material) => material.archived);
   const current = materials.find((m) => m.id === selected) ?? activeMaterials[0] ?? materials[0];
-  const totalProblems = activeMaterials.flatMap((m) => m.chapters.flatMap((c) => c.problems));
-  const solved = totalProblems.filter((p) => p.status === "solved" || p.status === "with-answer").length;
-  const review = totalProblems.filter((p) => p.status === "review").length;
-  const overall = totalProblems.length ? Math.round((solved / totalProblems.length) * 100) : 0;
+  const currentRound = current ? getActiveRound(current) : 1;
+  const totalProblems = activeMaterials.flatMap((material) => {
+    const round = getActiveRound(material);
+    return material.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, round)));
+  });
+  const allRoundProblems = activeMaterials.flatMap((material) =>
+    Array.from({ length: getRoundCount(material) }, (_, index) =>
+      material.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, index + 1))),
+    ).flat(),
+  );
+  const solved = allRoundProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
+  const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
+  const currentSolved = totalProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
+  const review = totalProblems.filter((problem) => problem.status === "review").length;
+  const overall = totalProblems.length ? Math.round((currentSolved / totalProblems.length) * 100) : 0;
   const heatDays = useMemo(() => {
     const today = new Date();
     return Array.from({ length: 49 }, (_, index) => {
@@ -229,41 +418,78 @@ export default function Home() {
   const weekCount = sumActivity(activity, weekStart, now);
   const monthCount = sumActivity(activity, monthStart, now);
   const goalPercent = (count: number, target: number) => target > 0 ? Math.min(100, Math.round((count / target) * 100)) : 0;
-  const streak = useMemo(() => {
-    const cursor = new Date();
-    cursor.setHours(12, 0, 0, 0);
-    if (!(activity[localDateKey(cursor)] > 0)) cursor.setDate(cursor.getDate() - 1);
-    let days = 0;
-    while (activity[localDateKey(cursor)] > 0) {
-      days += 1;
-      cursor.setDate(cursor.getDate() - 1);
-    }
-    return days;
-  }, [activity]);
+  const streak = useMemo(() => streakFromDays(pointDays), [pointDays]);
   const milestoneSteps = [10, 25, 50, 100, 250, 500];
   const unlockedMilestones = milestoneSteps.filter((step) => solved >= step);
-  const completedMaterials = activeMaterials.filter((material) => pct(material.chapters) === 100).length;
+  const completedRounds = activeMaterials.flatMap((material) =>
+    Array.from({ length: getRoundCount(material) }, (_, index) => pct(material.chapters, index + 1) === 100),
+  ).filter(Boolean).length;
   const nextMilestone = milestoneSteps.find((step) => solved < step);
-  const examMaterial = activeMaterials.find((material) => material.id === exam.materialId) ?? activeMaterials[0];
-  const examProblems = examMaterial?.chapters.flatMap((chapter) => chapter.problems) ?? [];
-  const examSolved = examProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
-  const examReview = examProblems.filter((problem) => problem.status === "review").length;
-  const daysUntilExam = exam.date ? Math.ceil((new Date(`${exam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
+  const enabledExams = exams.filter((exam) => exam.enabled);
+  const nextExam = [...enabledExams].sort((a, b) => {
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return a.date.localeCompare(b.date);
+  })[0];
+  const nextExamMaterial = nextExam ? activeMaterials.find((material) => material.id === nextExam.materialId) : undefined;
+  const nextExamDays = nextExam?.date ? Math.ceil((new Date(`${nextExam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
   const dateLabel = new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long", day: "numeric", weekday: "long" }).format(now);
 
   const filteredChapters = current?.chapters.map((chapter) => ({
     ...chapter,
-    problems:
-      filter === "all"
-        ? chapter.problems
-        : chapter.problems.filter((problem) => problem.status === filter),
+    problems: chapter.problems
+      .map((problem) => ({ ...problem, ...getProblemState(problem, currentRound) }))
+      .filter((problem) => filter === "all" || problem.status === filter),
   })) ?? [];
+
+  const grantPointAwards = (candidates: PointAward[]) => {
+    const existingKeys = new Set(pointAwards.map((award) => award.key));
+    const newAwards = candidates.filter((award) => !existingKeys.has(award.key));
+    if (newAwards.length === 0) return;
+    setPointAwards((awards) => {
+      const currentKeys = new Set(awards.map((award) => award.key));
+      return [...awards, ...candidates.filter((award) => !currentKeys.has(award.key))];
+    });
+    const gained = newAwards.reduce((sum, award) => sum + award.points, 0);
+    setPointToast(`＋${gained} pt　${newAwards.map((award) => award.label).join("・")}`);
+  };
 
   const cycleProblem = (chapterId: string, problemId: number) => {
     const targetProblem = current.chapters
       .find((chapter) => chapter.id === chapterId)
       ?.problems.find((problem) => problem.id === problemId);
-    const shouldRecord = !targetProblem?.studiedOn;
+    if (!targetProblem) return;
+    const targetState = getProblemState(targetProblem, currentRound);
+    const shouldRecord = !targetState.studiedOn;
+    const nextStatus = statusOrder[(statusOrder.indexOf(targetState.status) + 1) % statusOrder.length];
+    const today = localDateKey();
+    const nextPointDays = pointDays.includes(today) ? pointDays : [...pointDays, today];
+    const awardId = `${current.id}:${currentRound}:${chapterId}:${problemId}`;
+    const awards: PointAward[] = [];
+    if (!pointDays.includes(today)) {
+      setPointDays(nextPointDays);
+      awards.push({ key: `daily:${today}`, points: 5, label: "今日の初学習", earnedOn: today });
+      const nextStreak = streakFromDays(nextPointDays);
+      if (streakBonuses[nextStreak]) {
+        awards.push({ key: `streak:${nextStreak}`, points: streakBonuses[nextStreak], label: `${nextStreak}日連続学習`, earnedOn: today });
+      }
+    }
+    if (shouldRecord) {
+      awards.push({ key: `start:${awardId}`, points: 1, label: "新しい問題に着手", earnedOn: today });
+    }
+    if (nextStatus === "solved") {
+      awards.push({ key: `solve:${awardId}`, points: 2, label: "問題を解決", earnedOn: today });
+    }
+    const willCompleteRound = isSolvedStatus(nextStatus) && current.chapters.every((chapter) =>
+      chapter.problems.every((problem) => {
+        if (chapter.id === chapterId && problem.id === problemId) return true;
+        return isSolvedStatus(getProblemState(problem, currentRound).status);
+      }),
+    );
+    if (willCompleteRound) {
+      awards.push({ key: `complete:${current.id}:${currentRound}`, points: 50, label: `${current.title} 第${currentRound}周を完走`, earnedOn: today });
+    }
+    grantPointAwards(awards);
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -275,37 +501,27 @@ export default function Home() {
                   ? chapter
                   : {
                       ...chapter,
-                      problems: chapter.problems.map((problem) =>
-                        problem.id !== problemId
-                          ? problem
-                          : (() => {
-                              return {
-                                ...problem,
-                                studiedOn: problem.studiedOn ?? localDateKey(),
-                                status:
-                                  statusOrder[
-                                    (statusOrder.indexOf(problem.status) + 1) %
-                                      statusOrder.length
-                                  ],
-                              };
-                            })(),
-                      ),
+                      problems: chapter.problems.map((problem) => problem.id !== problemId
+                        ? problem
+                        : withProblemState(problem, currentRound, {
+                            studiedOn: targetState.studiedOn ?? today,
+                            status: nextStatus,
+                          })),
                     },
               ),
             },
       ),
     );
     if (shouldRecord) {
-      const today = localDateKey();
       setActivity((days) => ({ ...days, [today]: (days[today] ?? 0) + 1 }));
     }
   };
 
   const resetProblem = (chapterId: string, problemId: number) => {
-    const studiedOn = current.chapters
+    const targetProblem = current.chapters
       .find((chapter) => chapter.id === chapterId)
-      ?.problems.find((problem) => problem.id === problemId)
-      ?.studiedOn;
+      ?.problems.find((problem) => problem.id === problemId);
+    const studiedOn = targetProblem ? getProblemState(targetProblem, currentRound).studiedOn : undefined;
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -319,7 +535,11 @@ export default function Home() {
                       ...chapter,
                       problems: chapter.problems.map((problem) => {
                         if (problem.id !== problemId) return problem;
-                        return { id: problem.id, status: "todo" as Status };
+                        if (currentRound === 1) {
+                          return { ...problem, studiedOn: undefined, status: "todo" as Status };
+                        }
+                        const rounds = { ...problem.rounds, [String(currentRound)]: { status: "todo" as Status } };
+                        return { ...problem, rounds };
                       }),
                     },
               ),
@@ -335,6 +555,18 @@ export default function Home() {
         return next;
       });
     }
+  };
+
+  const setMaterialRound = (materialId: string, round: number) => {
+    setMaterials((items) => items.map((material) => material.id === materialId ? { ...material, activeRound: round } : material));
+    setFilter("all");
+  };
+
+  const startNextRound = () => {
+    const nextRound = getRoundCount(current) + 1;
+    if (!window.confirm(`${current.title}の第${nextRound}周を開始しますか？\nこれまでの記録は残したまま、新しい状態で取り組めます。`)) return;
+    setMaterials((items) => items.map((material) => material.id === current.id ? { ...material, roundCount: nextRound, activeRound: nextRound } : material));
+    setFilter("all");
   };
 
   const openAdd = () => {
@@ -433,14 +665,31 @@ export default function Home() {
     }
   };
 
+  const addExam = () => {
+    const id = `exam-${Date.now()}`;
+    setExams((items) => [...items, { id, enabled: true, name: "", date: "", materialId: activeMaterials[0]?.id ?? "", round: activeMaterials[0] ? getActiveRound(activeMaterials[0]) : 1 }]);
+  };
+
+  const updateExam = (id: string, changes: Partial<ExamSettings>) => {
+    setExams((items) => items.map((exam) => exam.id === id ? { ...exam, ...changes } : exam));
+  };
+
+  const deleteExam = (id: string) => {
+    if (!window.confirm("この試験を削除しますか？")) return;
+    setExams((items) => items.filter((exam) => exam.id !== id));
+  };
+
   const exportData = () => {
     const backup = {
-      version: 3,
+      version: 6,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
       goals,
-      exam,
+      exams,
+      studyPoints,
+      pointDays,
+      pointAwards,
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -459,13 +708,20 @@ export default function Home() {
         throw new Error("教材データがありません");
       }
       setMaterials(restoredMaterials);
-      setActivity(
-        !Array.isArray(parsed) && parsed.activity && typeof parsed.activity === "object"
-          ? parsed.activity
-          : {},
-      );
+      const restoredActivity = !Array.isArray(parsed) && parsed.activity && typeof parsed.activity === "object" ? parsed.activity as Record<string, number> : {};
+      setActivity(restoredActivity);
+      const restoredPointDays = normalizePointDays(!Array.isArray(parsed) && Array.isArray(parsed.pointDays) ? parsed.pointDays : studiedDays(restoredActivity));
+      const restoredPointAwards = !Array.isArray(parsed) ? validPointAwards(parsed.pointAwards) : null;
+      const legacyPoints = !Array.isArray(parsed) && typeof parsed.studyPoints === "number" ? Math.max(0, parsed.studyPoints) : 0;
+      setPointDays(restoredPointDays);
+      setPointAwards(restoredPointAwards ?? migratePointAwards(restoredMaterials, restoredPointDays, legacyPoints));
       if (!Array.isArray(parsed) && parsed.goals) setGoals(parsed.goals);
-      if (!Array.isArray(parsed) && parsed.exam) setExam(parsed.exam);
+      if (!Array.isArray(parsed)) {
+        if (Array.isArray(parsed.exams)) setExams(parsed.exams);
+        else if (parsed.exam) setExams([{ ...parsed.exam, id: parsed.exam.id ?? "exam-imported" }]);
+      } else {
+        setExams([]);
+      }
       setSelected(restoredMaterials[0].id);
       setView("home");
       alert("バックアップを反映しました。");
@@ -503,7 +759,7 @@ export default function Home() {
             >
               <i style={{ background: material.color }} />
               <span>{material.title}</span>
-              <small>{pct(material.chapters)}%</small>
+              <small>{pct(material.chapters, getActiveRound(material))}%</small>
             </button>
           ))}
           <button className="add-link" onClick={openAdd}>＋ 教材を追加</button>
@@ -549,7 +805,7 @@ export default function Home() {
                       <span className="book-chip" style={{ background: material.color }}>{material.kind === "授業" ? "授" : "本"}</span>
                       <div><small>{material.kind}</small><h3>{material.title}</h3><p>{material.chapters.length}章・全{count}問</p></div>
                     </button>
-                    <div className="material-card-progress"><strong>{pct(material.chapters)}%</strong><div><i style={{ width: `${pct(material.chapters)}%`, background: material.color }} /></div></div>
+                    <div className="material-card-progress"><strong>第{getActiveRound(material)}周・{pct(material.chapters, getActiveRound(material))}%</strong><div><i style={{ width: `${pct(material.chapters, getActiveRound(material))}%`, background: material.color }} /></div></div>
                     <div className="material-actions">
                       <button className="secondary-button" onClick={() => moveMaterial(material.id, -1)} disabled={sourceIndex === 0} aria-label={`${material.title}を上へ移動`}>↑</button>
                       <button className="secondary-button" onClick={() => moveMaterial(material.id, 1)} disabled={sourceIndex === materials.length - 1} aria-label={`${material.title}を下へ移動`}>↓</button>
@@ -580,15 +836,16 @@ export default function Home() {
           <section className="view-panel">
             <div className="view-heading"><div><p className="eyebrow">REVIEW QUEUE</p><h2>復習キュー</h2><p>{review}問が復習を待っています</p></div></div>
             <div className="review-list">
-              {activeMaterials.flatMap((material) => material.chapters.flatMap((chapter) =>
-                chapter.problems.filter((problem) => problem.status === "review").map((problem) => (
-                  <article className="review-item" key={`${material.id}-${chapter.id}-${problem.id}`}>
+              {activeMaterials.flatMap((material) => {
+                const round = getActiveRound(material);
+                return material.chapters.flatMap((chapter) => chapter.problems.filter((problem) => getProblemState(problem, round).status === "review").map((problem) => (
+                  <article className="review-item" key={`${material.id}-${round}-${chapter.id}-${problem.id}`}>
                     <span className="review-number">{problem.id}</span>
-                    <div><small>{material.title}</small><h3>{chapter.title}・問題 {problem.id}</h3></div>
+                    <div><small>{material.title}・第{round}周</small><h3>{chapter.title}・問題 {problem.id}</h3></div>
                     <button className="secondary-button" onClick={() => { setSelected(material.id); setView("home"); setFilter("review"); }}>問題を開く</button>
                   </article>
-                )),
-              ))}
+                )));
+              })}
               {review === 0 && <div className="empty-state"><strong>復習待ちはありません</strong><p>問題マスを「復習待ち」にすると、ここにまとまります。</p></div>}
             </div>
           </section>
@@ -635,7 +892,23 @@ export default function Home() {
                 <strong>{streak}<small>日</small></strong>
                 <span>{streak > 0 ? "今日も一歩ずつ続けよう" : "今日1問解くとスタート"}</span>
               </article>
+              <article className="point-card">
+                <span className="point-icon">◆</span>
+                <p>累計ポイント</p>
+                <strong>{studyPoints}<small> pt</small></strong>
+                <span>問題・継続・完走でポイント</span>
+              </article>
             </div>
+            <section className="point-rules-section">
+              <div className="section-heading"><div><p className="eyebrow">POINT RULES</p><h3>ポイントの貯め方</h3></div><span>同じ記録からの重複獲得はありません</span></div>
+              <div className="point-rules">
+                <article><span>☀</span><div><strong>今日の初学習</strong><small>その日のスタート</small></div><b>＋5 pt</b></article>
+                <article><span>↗</span><div><strong>新しい問題に着手</strong><small>1問・1周につき初回</small></div><b>＋1 pt</b></article>
+                <article><span>✓</span><div><strong>問題を解決</strong><small>1問・1周につき初回</small></div><b>＋2 pt</b></article>
+                <article><span>✦</span><div><strong>連続学習</strong><small>3・7・14・30日など</small></div><b>＋3〜300 pt</b></article>
+                <article><span>旗</span><div><strong>教材を100%完走</strong><small>教材の1周ごと</small></div><b>＋50 pt</b></article>
+              </div>
+            </section>
             <section className="milestone-section">
               <div className="section-heading"><div><p className="eyebrow">MILESTONES</p><h3>マイルストーン</h3></div>{nextMilestone && <span>次は {nextMilestone}問まであと{nextMilestone - solved}問</span>}</div>
               <div className="milestone-grid">
@@ -643,7 +916,7 @@ export default function Home() {
                   const unlocked = solved >= step;
                   return <article className={unlocked ? "unlocked" : ""} key={step}><span>{unlocked ? "✓" : "◇"}</span><strong>{step}問 解決</strong><small>{unlocked ? "達成しました" : `${Math.min(solved, step)} / ${step}問`}</small></article>;
                 })}
-                <article className={completedMaterials > 0 ? "unlocked" : ""}><span>{completedMaterials > 0 ? "✓" : "◇"}</span><strong>教材を完走</strong><small>{completedMaterials > 0 ? `${completedMaterials}冊達成` : "最初の1冊を100%へ"}</small></article>
+                <article className={completedRounds > 0 ? "unlocked" : ""}><span>{completedRounds > 0 ? "✓" : "◇"}</span><strong>教材を完走</strong><small>{completedRounds > 0 ? `${completedRounds}周達成` : "最初の1周を100%へ"}</small></article>
               </div>
             </section>
           </section>
@@ -651,22 +924,37 @@ export default function Home() {
 
         {view === "exam" && (
           <section className="view-panel">
-            <div className="view-heading"><div><p className="eyebrow">EXAM MODE</p><h2>試験モード</h2><p>試験日と範囲を決めて、残りの学習を絞り込みます</p></div></div>
-            <div className="exam-layout">
-              <article className="settings-card exam-settings">
-                <label className="switch-row"><span><strong>試験モード</strong><small>ホームにも残り日数を表示します</small></span><input type="checkbox" checked={exam.enabled} onChange={(event) => setExam((value) => ({ ...value, enabled: event.target.checked }))} /></label>
-                <label>試験名<input value={exam.name} onChange={(event) => setExam((value) => ({ ...value, name: event.target.value }))} placeholder="例：線形代数学 中間試験" /></label>
-                <label>試験日<input type="date" value={exam.date} onChange={(event) => setExam((value) => ({ ...value, date: event.target.value }))} /></label>
-                <label>対象教材<select value={exam.materialId} onChange={(event) => setExam((value) => ({ ...value, materialId: event.target.value }))}>{activeMaterials.map((material) => <option value={material.id} key={material.id}>{material.title}</option>)}</select></label>
-              </article>
-              <article className="exam-summary">
-                <p>{exam.name.trim() || "試験名を設定してください"}</p>
-                <strong>{daysUntilExam === null ? "—" : daysUntilExam >= 0 ? `あと${daysUntilExam}日` : `${Math.abs(daysUntilExam)}日前`}</strong>
-                <span>{examMaterial?.title ?? "対象教材なし"}</span>
-                <div className="exam-stats"><div><b>{examSolved}</b><small>解決済み</small></div><div><b>{Math.max(0, examProblems.length - examSolved)}</b><small>未解決</small></div><div><b>{examReview}</b><small>復習待ち</small></div></div>
-                <div className="goal-track"><i style={{ width: `${examProblems.length ? Math.round((examSolved / examProblems.length) * 100) : 0}%` }} /></div>
-                {examMaterial && <button className="primary-button" onClick={() => { setSelected(examMaterial.id); setView("home"); }}>対象教材を開く</button>}
-              </article>
+            <div className="view-heading"><div><p className="eyebrow">EXAM MODE</p><h2>試験モード</h2><p>複数の試験日と範囲をまとめて管理できます</p></div><button className="primary-button" onClick={addExam}>＋ 試験を追加</button></div>
+            <div className="exam-list">
+              {exams.map((exam) => {
+                const material = activeMaterials.find((item) => item.id === exam.materialId) ?? activeMaterials[0];
+                const round = material ? Math.min(getRoundCount(material), Math.max(1, exam.round ?? getActiveRound(material))) : 1;
+                const problems = material?.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, round))) ?? [];
+                const solvedCount = problems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
+                const reviewCount = problems.filter((problem) => problem.status === "review").length;
+                const days = exam.date ? Math.ceil((new Date(`${exam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
+                return (
+                  <article className="exam-card" key={exam.id}>
+                    <div className="exam-settings">
+                      <label className="switch-row"><span><strong>{exam.name.trim() || "新しい試験"}</strong><small>ホームの直近試験に表示</small></span><input type="checkbox" checked={exam.enabled} onChange={(event) => updateExam(exam.id, { enabled: event.target.checked })} /></label>
+                      <label>試験名<input value={exam.name} onChange={(event) => updateExam(exam.id, { name: event.target.value })} placeholder="例：線形代数学 中間試験" /></label>
+                      <label>試験日<input type="date" value={exam.date} onChange={(event) => updateExam(exam.id, { date: event.target.value })} /></label>
+                      <label>対象教材<select value={exam.materialId} onChange={(event) => { const materialId = event.target.value; const selectedMaterial = activeMaterials.find((item) => item.id === materialId); updateExam(exam.id, { materialId, round: selectedMaterial ? getActiveRound(selectedMaterial) : 1 }); }}>{activeMaterials.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>
+                      {material && <label>対象の周<select value={round} onChange={(event) => updateExam(exam.id, { round: Number(event.target.value) })}>{Array.from({ length: getRoundCount(material) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select></label>}
+                      <button className="danger-button" onClick={() => deleteExam(exam.id)}>試験を削除</button>
+                    </div>
+                    <div className="exam-summary">
+                      <p>{exam.name.trim() || "試験名を設定してください"}</p>
+                      <strong>{days === null ? "—" : days >= 0 ? `あと${days}日` : `${Math.abs(days)}日前`}</strong>
+                      <span>{material ? `${material.title}・第${round}周` : "対象教材なし"}</span>
+                      <div className="exam-stats"><div><b>{solvedCount}</b><small>解決済み</small></div><div><b>{Math.max(0, problems.length - solvedCount)}</b><small>未解決</small></div><div><b>{reviewCount}</b><small>復習待ち</small></div></div>
+                      <div className="goal-track"><i style={{ width: `${problems.length ? Math.round((solvedCount / problems.length) * 100) : 0}%` }} /></div>
+                      {material && <button className="primary-button" onClick={() => { setSelected(material.id); setView("home"); }}>対象教材を開く</button>}
+                    </div>
+                  </article>
+                );
+              })}
+              {exams.length === 0 && <div className="empty-state"><strong>試験はまだ登録されていません</strong><p>試験日を登録すると、残り日数と対象教材の進捗を確認できます。</p><button className="primary-button" onClick={addExam}>最初の試験を追加</button></div>}
             </div>
           </section>
         )}
@@ -701,10 +989,11 @@ export default function Home() {
         </section>
 
         <section className="quick-stats" aria-label="目標と実績">
+          <button className="point-quick" onClick={() => setView("goals")}><span>累計ポイント</span><strong>{studyPoints}<small> pt</small></strong><em>{pointDays.includes(localDateKey()) ? "今日の初学習ボーナス獲得済み" : "今日の最初の学習で＋5"}</em></button>
           <button onClick={() => setView("goals")}><span>今週の目標</span><strong>{weekCount}<small> / {goals.weekly}問</small></strong><i><b style={{ width: `${goalPercent(weekCount, goals.weekly)}%` }} /></i></button>
           <button onClick={() => setView("goals")}><span>連続学習</span><strong>{streak}<small>日</small></strong><em>自己ベストを伸ばそう</em></button>
-          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{unlockedMilestones.length + (completedMaterials > 0 ? 1 : 0)}<small>個獲得</small></strong><em>{nextMilestone ? `次は${nextMilestone}問` : "すべて達成"}</em></button>
-          {exam.enabled && <button className="exam-quick" onClick={() => setView("exam")}><span>{exam.name.trim() || "試験モード"}</span><strong>{daysUntilExam === null ? "日付未設定" : daysUntilExam >= 0 ? `あと${daysUntilExam}日` : "試験終了"}</strong><em>{examMaterial?.title}</em></button>}
+          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{unlockedMilestones.length + (completedRounds > 0 ? 1 : 0)}<small>個獲得</small></strong><em>{nextMilestone ? `次は${nextMilestone}問` : "すべて達成"}</em></button>
+          {nextExam && <button className="exam-quick" onClick={() => setView("exam")}><span>{nextExam.name.trim() || "直近の試験"}</span><strong>{nextExamDays === null ? "日付未設定" : nextExamDays >= 0 ? `あと${nextExamDays}日` : "試験終了"}</strong><em>{nextExamMaterial?.title}</em></button>}
         </section>
 
         <section className="material-head">
@@ -713,10 +1002,14 @@ export default function Home() {
             <div><p>{current.kind}</p><h2>{current.title}</h2></div>
           </div>
           <div className="material-progress">
-            <div><span>教材の進捗</span><strong>{pct(current.chapters)}%</strong></div>
-            <div className="progress-track"><i style={{ width: `${pct(current.chapters)}%`, background: current.color }} /></div>
+            <div><span>第{currentRound}周の進捗</span><strong>{pct(current.chapters, currentRound)}%</strong></div>
+            <div className="progress-track"><i style={{ width: `${pct(current.chapters, currentRound)}%`, background: current.color }} /></div>
           </div>
-          <button className="secondary-button edit-material" onClick={() => openEdit(current)}>章・問題数を設定</button>
+          <div className="material-head-actions">
+            <select aria-label="表示する周回" value={currentRound} onChange={(event) => setMaterialRound(current.id, Number(event.target.value))}>{Array.from({ length: getRoundCount(current) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select>
+            <button className="secondary-button" onClick={startNextRound}>＋ 次の周を開始</button>
+            <button className="secondary-button edit-material" onClick={() => openEdit(current)}>章・問題数を設定</button>
+          </div>
         </section>
 
         <section className="problem-section">
@@ -741,12 +1034,11 @@ export default function Home() {
                 <article className="chapter-card" key={chapter.id}>
                   <div className="chapter-row">
                     <div className="chapter-info">
-                      <button aria-label={`${chapter.title}を開閉`}>⌄</button>
-                      <div><h4>{chapter.title}</h4><p>{original.problems.length}問中 {original.problems.filter((p) => p.status === "solved" || p.status === "with-answer").length}問 解決</p></div>
+                      <h4>{chapter.title}</h4><p>{original.problems.length}問中 {original.problems.filter((problem) => { const state = getProblemState(problem, currentRound); return state.status === "solved" || state.status === "with-answer"; }).length}問 解決</p>
                     </div>
                     <div className="chapter-pct">
-                      <span>{pct([original])}%</span>
-                      <div><i style={{ width: `${pct([original])}%`, background: current.color }} /></div>
+                      <span>{pct([original], currentRound)}%</span>
+                      <div><i style={{ width: `${pct([original], currentRound)}%`, background: current.color }} /></div>
                     </div>
                   </div>
                   <div className="problem-grid">
@@ -806,6 +1098,7 @@ export default function Home() {
           </div>
         </div>
       )}
+      {pointToast && <div className="point-toast" role="status" aria-live="polite">{pointToast}</div>}
     </main>
   );
 }

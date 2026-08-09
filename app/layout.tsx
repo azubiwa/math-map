@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://math-map-study-jp.whole-cloud-6961.chatgpt.site";
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://azubiwa.github.io/math-map";
 const base = new URL(siteUrl.endsWith("/") ? siteUrl : `${siteUrl}/`);
 
 export const metadata: Metadata = {
