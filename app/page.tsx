@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { cloudSyncConfigured, supabase } from "@/lib/supabase";
 
 type Status = "todo" | "trying" | "solved" | "with-answer" | "review";
-type ProblemState = { status: Status; studiedOn?: string };
+type ProblemState = {
+  status: Status;
+  studiedOn?: string;
+  reviewCount?: number;
+  reviewDueAt?: string;
+  lastReviewedAt?: string;
+};
 type Problem = ProblemState & { id: number; rounds?: Record<string, ProblemState> };
 type Chapter = { id: string; title: string; problems: Problem[] };
 type Material = {
@@ -21,6 +29,43 @@ type ChapterDraft = { title: string; count: number };
 type Goals = { weekly: number; monthly: number };
 type ExamSettings = { id: string; enabled: boolean; name: string; date: string; materialId: string; round?: number };
 type PointAward = { key: string; points: number; label: string; earnedOn: string };
+type StudyEvent = {
+  id: string;
+  type: "study" | "solve" | "review";
+  date: string;
+  problemKey?: string;
+};
+type TimedReward = { id: string; unlockAt: string; expiresAt: string };
+type TimedRewardState = { solvedProgress: number; rewards: TimedReward[] };
+type ReviewEntry = {
+  material: Material;
+  chapter: Chapter;
+  problem: Problem;
+  round: number;
+  state: ProblemState;
+  dueTime: number;
+};
+type StudySnapshot = {
+  version: number;
+  exportedAt: string;
+  materials: Material[];
+  activity: Record<string, number>;
+  goals: Goals;
+  exams: ExamSettings[];
+  pointDays: string[];
+  pointAwards: PointAward[];
+  studyEvents: StudyEvent[];
+  timedRewardState: TimedRewardState;
+};
+type PendingCloudData = { snapshot: StudySnapshot; updatedAt: string };
+type SyncStatus = "local" | "checking" | "choose" | "synced" | "error";
+
+const dailyTargets = { study: 3, solve: 2, review: 1 };
+const weeklyTarget = 100;
+const reviewIntervals = [1, 3, 7, 14, 30];
+const timedRewardRequiredSolves = 5;
+const timedRewardDelayMs = 3 * 60 * 60 * 1000;
+const timedRewardWindowMs = 24 * 60 * 60 * 1000;
 
 const streakBonuses: Record<number, number> = {
   3: 3,
@@ -133,6 +178,13 @@ function startOfWeek(date = new Date()) {
   return start;
 }
 
+function endOfWeek(date = new Date()) {
+  const end = startOfWeek(date);
+  end.setDate(end.getDate() + 7);
+  end.setHours(0, 0, 0, 0);
+  return end;
+}
+
 function sumActivity(activity: Record<string, number>, from: Date, to: Date) {
   return Object.entries(activity).reduce((sum, [key, count]) => {
     const date = new Date(`${key}T12:00:00`);
@@ -149,7 +201,15 @@ function getActiveRound(material: Material) {
 }
 
 function getProblemState(problem: Problem, round: number): ProblemState {
-  if (round === 1) return { status: problem.status, studiedOn: problem.studiedOn };
+  if (round === 1) {
+    return {
+      status: problem.status,
+      studiedOn: problem.studiedOn,
+      reviewCount: problem.reviewCount,
+      reviewDueAt: problem.reviewDueAt,
+      lastReviewedAt: problem.lastReviewedAt,
+    };
+  }
   return problem.rounds?.[String(round)] ?? { status: "todo" };
 }
 
@@ -169,6 +229,127 @@ function pct(chapters: Chapter[], round = 1) {
 
 function studiedDays(activity: Record<string, number>) {
   return Object.entries(activity).filter(([, count]) => count > 0).map(([date]) => date);
+}
+
+function daysBetween(from: string, to: string) {
+  return Math.round((new Date(`${to}T12:00:00`).getTime() - new Date(`${from}T12:00:00`).getTime()) / 86400000);
+}
+
+function formatRemaining(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const time = [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+  return days > 0 ? `${days}日 ${time}` : time;
+}
+
+function validStudyEvents(value: unknown): StudyEvent[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = new Set<string>();
+  return value.filter((event): event is StudyEvent => {
+    if (!event || typeof event !== "object") return false;
+    const candidate = event as Partial<StudyEvent>;
+    const valid = typeof candidate.id === "string"
+      && (candidate.type === "study" || candidate.type === "solve" || candidate.type === "review")
+      && typeof candidate.date === "string";
+    if (!valid || ids.has(candidate.id!)) return false;
+    ids.add(candidate.id!);
+    return true;
+  });
+}
+
+function migrateStudyEvents(activity: Record<string, number>) {
+  return Object.entries(activity).flatMap(([date, count]) =>
+    Array.from({ length: Math.max(0, count) }, (_, index): StudyEvent => ({
+      id: `migrated:${date}:${index}`,
+      type: "study",
+      date,
+    })),
+  );
+}
+
+function validTimedRewardState(value: unknown): TimedRewardState | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<TimedRewardState>;
+  if (typeof candidate.solvedProgress !== "number" || !Number.isFinite(candidate.solvedProgress) || !Array.isArray(candidate.rewards)) return null;
+  const rewards = candidate.rewards.filter((reward): reward is TimedReward => Boolean(
+    reward
+    && typeof reward.id === "string"
+    && typeof reward.unlockAt === "string"
+    && typeof reward.expiresAt === "string",
+  ));
+  return { solvedProgress: Math.max(0, Math.floor(candidate.solvedProgress ?? 0)), rewards };
+}
+
+function validStudySnapshot(value: unknown): StudySnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<StudySnapshot>;
+  if (!Array.isArray(candidate.materials) || candidate.materials.length === 0) return null;
+  const activity = candidate.activity && typeof candidate.activity === "object" ? candidate.activity : {};
+  const goals = candidate.goals && typeof candidate.goals === "object" ? candidate.goals : { weekly: 20, monthly: 80 };
+  const pointDays = normalizePointDays(Array.isArray(candidate.pointDays) ? candidate.pointDays : studiedDays(activity));
+  const pointAwards = validPointAwards(candidate.pointAwards) ?? migratePointAwards(candidate.materials, pointDays, 0);
+  const studyEvents = validStudyEvents(candidate.studyEvents) ?? migrateStudyEvents(activity);
+  const timedRewards = validTimedRewardState(candidate.timedRewardState) ?? { solvedProgress: 0, rewards: [] };
+  return {
+    version: typeof candidate.version === "number" ? candidate.version : 1,
+    exportedAt: typeof candidate.exportedAt === "string" ? candidate.exportedAt : new Date().toISOString(),
+    materials: candidate.materials,
+    activity,
+    goals,
+    exams: Array.isArray(candidate.exams) ? candidate.exams : [],
+    pointDays,
+    pointAwards,
+    studyEvents,
+    timedRewardState: timedRewards,
+  };
+}
+
+async function loadCloudSnapshot(userId: string): Promise<PendingCloudData | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from("math_map_snapshots")
+    .select("data, updated_at")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const snapshot = validStudySnapshot(data.data);
+  if (!snapshot) throw new Error("クラウドデータの形式を確認できませんでした");
+  return { snapshot, updatedAt: data.updated_at };
+}
+
+async function saveCloudSnapshot(userId: string, snapshot: StudySnapshot) {
+  if (!supabase) throw new Error("クラウド同期が設定されていません");
+  const updatedAt = new Date().toISOString();
+  const { error } = await supabase.from("math_map_snapshots").upsert({
+    user_id: userId,
+    data: snapshot,
+    version: snapshot.version,
+    updated_at: updatedAt,
+  }, { onConflict: "user_id" });
+  if (error) throw error;
+  return updatedAt;
+}
+
+function dailyEventProgress(events: StudyEvent[], date: string) {
+  const todayEvents = events.filter((event) => event.date === date);
+  return {
+    study: todayEvents.filter((event) => event.type === "study").length,
+    solve: todayEvents.filter((event) => event.type === "solve").length,
+    review: todayEvents.filter((event) => event.type === "review").length,
+  };
+}
+
+function weeklyEventScore(events: StudyEvent[], from: string, to: string) {
+  return events.reduce((score, event) => {
+    if (event.date < from || event.date >= to) return score;
+    if (event.type === "solve") return score + 3;
+    if (event.type === "review") return score + 2;
+    return score + 1;
+  }, 0);
 }
 
 function isSolvedStatus(status: Status) {
@@ -229,7 +410,7 @@ function migratePointAwards(materials: Material[], pointDays: string[], legacyPo
   const awards: PointAward[] = pointDays.map((day) => ({
     key: `daily:${day}`,
     points: 5,
-    label: "今日の初学習",
+    label: "本日の初回学習",
     earnedOn: day,
   }));
 
@@ -247,9 +428,12 @@ function migratePointAwards(materials: Material[], pointDays: string[], legacyPo
             awards.push({ key: `solve:${awardId}`, points: 2, label: "問題を解決", earnedOn });
           }
         });
+        if (pct([chapter], round) === 100) {
+          awards.push({ key: `chapter:${material.id}:${round}:${chapter.id}`, points: 15, label: `${chapter.title}を完了`, earnedOn: localDateKey() });
+        }
       });
       if (pct(material.chapters, round) === 100) {
-        awards.push({ key: `complete:${material.id}:${round}`, points: 50, label: `${material.title} 第${round}周を完走`, earnedOn: localDateKey() });
+        awards.push({ key: `complete:${material.id}:${round}`, points: 50, label: `${material.title} 第${round}周を完了`, earnedOn: localDateKey() });
       }
     });
   });
@@ -286,9 +470,62 @@ export default function Home() {
   const [exams, setExams] = useState<ExamSettings[]>([]);
   const [pointAwards, setPointAwards] = useState<PointAward[]>([]);
   const [pointDays, setPointDays] = useState<string[]>([]);
+  const [studyEvents, setStudyEvents] = useState<StudyEvent[]>([]);
+  const [timedRewardState, setTimedRewardState] = useState<TimedRewardState>({ solvedProgress: 0, rewards: [] });
   const [pointToast, setPointToast] = useState("");
+  const [clock, setClock] = useState(() => Date.now());
   const [restored, setRestored] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncEmail, setSyncEmail] = useState("");
+  const [syncUser, setSyncUser] = useState<User | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("local");
+  const [syncMessage, setSyncMessage] = useState("");
+  const [pendingCloudData, setPendingCloudData] = useState<PendingCloudData | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState("");
+  const [syncRefresh, setSyncRefresh] = useState(0);
   const importInput = useRef<HTMLInputElement>(null);
+  const skipNextCloudPush = useRef(false);
+  const lastSyncedAtRef = useRef("");
+  const latestSnapshotRef = useRef<StudySnapshot>({
+    version: 8,
+    exportedAt: new Date().toISOString(),
+    materials: seed,
+    activity: {},
+    goals: { weekly: 20, monthly: 80 },
+    exams: [],
+    pointDays: [],
+    pointAwards: [],
+    studyEvents: [],
+    timedRewardState: { solvedProgress: 0, rewards: [] },
+  });
+  const applyStudySnapshot = useCallback((snapshot: StudySnapshot) => {
+    skipNextCloudPush.current = true;
+    setMaterials(snapshot.materials);
+    setActivity(snapshot.activity);
+    setGoals(snapshot.goals);
+    setExams(snapshot.exams);
+    setPointDays(snapshot.pointDays);
+    setPointAwards(snapshot.pointAwards);
+    setStudyEvents(snapshot.studyEvents);
+    setTimedRewardState(snapshot.timedRewardState);
+    setSelected(snapshot.materials[0].id);
+    setView("home");
+  }, []);
+
+  useEffect(() => {
+    latestSnapshotRef.current = {
+      version: 8,
+      exportedAt: new Date().toISOString(),
+      materials,
+      activity,
+      goals,
+      exams,
+      pointDays,
+      pointAwards,
+      studyEvents,
+      timedRewardState,
+    };
+  }, [activity, exams, goals, materials, pointAwards, pointDays, studyEvents, timedRewardState]);
 
   useEffect(() => {
     const restoreTimer = window.setTimeout(() => {
@@ -300,6 +537,8 @@ export default function Home() {
       const savedPoints = localStorage.getItem("math-map-points");
       const savedPointDays = localStorage.getItem("math-map-point-days");
       const savedPointAwards = localStorage.getItem("math-map-point-awards");
+      const savedStudyEvents = localStorage.getItem("math-map-study-events");
+      const savedTimedRewards = localStorage.getItem("math-map-timed-rewards");
       let restoredMaterials = seed;
       let restoredActivity: Record<string, number> = {};
       if (saved) {
@@ -336,6 +575,17 @@ export default function Home() {
       }
       const hasSavedProgress = Boolean(saved || savedActivity || savedPointDays || savedPoints);
       setPointAwards(restoredPointAwards ?? (hasSavedProgress ? migratePointAwards(restoredMaterials, restoredPointDays, Math.max(0, Number(savedPoints) || 0)) : []));
+      let restoredStudyEvents: StudyEvent[] | null = null;
+      if (savedStudyEvents) {
+        try { restoredStudyEvents = validStudyEvents(JSON.parse(savedStudyEvents)); } catch {}
+      }
+      setStudyEvents(restoredStudyEvents ?? migrateStudyEvents(restoredActivity));
+      if (savedTimedRewards) {
+        try {
+          const restoredTimedRewards = validTimedRewardState(JSON.parse(savedTimedRewards));
+          if (restoredTimedRewards) setTimedRewardState(restoredTimedRewards);
+        } catch {}
+      }
       localStorage.removeItem("math-map-xp");
       localStorage.removeItem("math-map-points");
       setRestored(true);
@@ -375,6 +625,130 @@ export default function Home() {
   }, [pointAwards, pointDays, restored]);
 
   useEffect(() => {
+    if (!restored) return;
+    localStorage.setItem("math-map-study-events", JSON.stringify(studyEvents));
+    localStorage.setItem("math-map-timed-rewards", JSON.stringify(timedRewardState));
+  }, [restored, studyEvents, timedRewardState]);
+
+  useEffect(() => {
+    if (!restored || !supabase) return;
+    let active = true;
+    void supabase.auth.getSession().then(({ data }) => {
+      if (active) setSyncUser(data.session?.user ?? null);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      setSyncUser(session?.user ?? null);
+      if (!session) {
+        setSyncStatus("local");
+        setPendingCloudData(null);
+        setLastSyncedAt("");
+        lastSyncedAtRef.current = "";
+      }
+    });
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, [restored]);
+
+  const syncUserId = syncUser?.id ?? "";
+
+  useEffect(() => {
+    if (!restored || !supabase || !syncUserId) return;
+    let active = true;
+    const initializeCloudSync = async () => {
+      setSyncStatus("checking");
+      setSyncMessage("");
+      try {
+        const cloud = await loadCloudSnapshot(syncUserId);
+        if (!active) return;
+        if (!cloud) {
+          const updatedAt = await saveCloudSnapshot(syncUserId, latestSnapshotRef.current);
+          if (!active) return;
+          localStorage.setItem("math-map-cloud-user", syncUserId);
+          lastSyncedAtRef.current = updatedAt;
+          setLastSyncedAt(updatedAt);
+          setSyncStatus("synced");
+          setSyncMessage("この端末のデータをクラウドへ保存しました。");
+          return;
+        }
+        if (localStorage.getItem("math-map-cloud-user") === syncUserId) {
+          applyStudySnapshot(cloud.snapshot);
+          lastSyncedAtRef.current = cloud.updatedAt;
+          setLastSyncedAt(cloud.updatedAt);
+          setSyncStatus("synced");
+          setSyncMessage("クラウドの最新データを反映しました。");
+          return;
+        }
+        setPendingCloudData(cloud);
+        setSyncStatus("choose");
+      } catch {
+        if (!active) return;
+        setSyncStatus("error");
+        setSyncMessage("クラウドに接続できませんでした。設定を確認して再試行してください。");
+      }
+    };
+    void initializeCloudSync();
+    return () => { active = false; };
+  }, [applyStudySnapshot, restored, syncRefresh, syncUserId]);
+
+  useEffect(() => {
+    if (!restored || !supabase || !syncUserId || syncStatus !== "synced") return;
+    if (skipNextCloudPush.current) {
+      skipNextCloudPush.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void saveCloudSnapshot(syncUserId, latestSnapshotRef.current).then((updatedAt) => {
+        localStorage.setItem("math-map-cloud-user", syncUserId);
+        lastSyncedAtRef.current = updatedAt;
+        setLastSyncedAt(updatedAt);
+        setSyncMessage("変更を同期しました。");
+      }).catch(() => {
+        setSyncStatus("error");
+        setSyncMessage("変更は端末に保存されています。クラウドへの同期を再試行してください。");
+      });
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [activity, exams, goals, materials, pointAwards, pointDays, restored, studyEvents, syncStatus, syncUserId, timedRewardState]);
+
+  useEffect(() => {
+    if (!supabase || !syncUserId || syncStatus !== "synced") return;
+    let active = true;
+    const pullLatest = async () => {
+      try {
+        const cloud = await loadCloudSnapshot(syncUserId);
+        if (!active || !cloud || cloud.updatedAt <= lastSyncedAtRef.current) return;
+        applyStudySnapshot(cloud.snapshot);
+        lastSyncedAtRef.current = cloud.updatedAt;
+        setLastSyncedAt(cloud.updatedAt);
+        setSyncMessage("別の端末での変更を反映しました。");
+      } catch {
+        // 自動確認に失敗しても端末内保存は継続する。
+      }
+    };
+    const handleFocus = () => { void pullLatest(); };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void pullLatest();
+    };
+    const timer = window.setInterval(() => { void pullLatest(); }, 60000);
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [applyStudySnapshot, syncStatus, syncUserId]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (!pointToast) return;
     const timer = window.setTimeout(() => setPointToast(""), 2400);
     return () => window.clearTimeout(timer);
@@ -384,6 +758,27 @@ export default function Home() {
   const archivedMaterials = materials.filter((material) => material.archived);
   const current = materials.find((m) => m.id === selected) ?? activeMaterials[0] ?? materials[0];
   const currentRound = current ? getActiveRound(current) : 1;
+  const now = new Date(clock);
+  const todayKey = localDateKey(now);
+  const reviewEntries: ReviewEntry[] = activeMaterials.flatMap((material) =>
+    Array.from({ length: getRoundCount(material) }, (_, index) => index + 1).flatMap((round) =>
+      material.chapters.flatMap((chapter) => chapter.problems.flatMap((problem) => {
+        const state = getProblemState(problem, round);
+        if (state.status === "todo" || (!state.reviewDueAt && state.status !== "review")) return [];
+        return [{
+          material,
+          chapter,
+          problem,
+          round,
+          state,
+          dueTime: state.reviewDueAt ? new Date(state.reviewDueAt).getTime() : 0,
+        }];
+      })),
+    ),
+  ).sort((a, b) => a.dueTime - b.dueTime);
+  const dueReviews = reviewEntries.filter((entry) => entry.dueTime <= clock);
+  const upcomingReviews = reviewEntries.filter((entry) => entry.dueTime > clock);
+  const review = dueReviews.length;
   const totalProblems = activeMaterials.flatMap((material) => {
     const round = getActiveRound(material);
     return material.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, round)));
@@ -396,29 +791,42 @@ export default function Home() {
   const solved = allRoundProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
   const currentSolved = totalProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
-  const review = totalProblems.filter((problem) => problem.status === "review").length;
   const overall = totalProblems.length ? Math.round((currentSolved / totalProblems.length) * 100) : 0;
-  const heatDays = useMemo(() => {
-    const today = new Date();
-    return Array.from({ length: 49 }, (_, index) => {
-      const date = new Date(today);
-      date.setHours(12, 0, 0, 0);
-      date.setDate(today.getDate() - (48 - index));
-      const key = localDateKey(date);
-      const count = activity[key] ?? 0;
-      const level = count === 0 ? 0 : count <= 2 ? 1 : count <= 5 ? 2 : count <= 9 ? 3 : 4;
-      return { key, date, count, level };
-    });
-  }, [activity]);
+  const heatToday = new Date(`${todayKey}T12:00:00`);
+  const heatDays = Array.from({ length: 49 }, (_, index) => {
+    const date = new Date(heatToday);
+    date.setHours(12, 0, 0, 0);
+    date.setDate(heatToday.getDate() - (48 - index));
+    const key = localDateKey(date);
+    const count = activity[key] ?? 0;
+    const level = count === 0 ? 0 : count <= 2 ? 1 : count <= 5 ? 2 : count <= 9 ? 3 : 4;
+    return { key, date, count, level };
+  });
   const activeDays = heatDays.filter((day) => day.count > 0).length;
-  const todayCount = activity[localDateKey()] ?? 0;
-  const now = new Date();
+  const todayCount = activity[todayKey] ?? 0;
   const weekStart = startOfWeek(now);
+  const weekEnd = endOfWeek(now);
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 12);
   const weekCount = sumActivity(activity, weekStart, now);
   const monthCount = sumActivity(activity, monthStart, now);
   const goalPercent = (count: number, target: number) => target > 0 ? Math.min(100, Math.round((count / target) * 100)) : 0;
   const streak = useMemo(() => streakFromDays(pointDays), [pointDays]);
+  const dailyProgress = dailyEventProgress(studyEvents, todayKey);
+  const dailyCompleted = dailyProgress.study >= dailyTargets.study
+    && dailyProgress.solve >= dailyTargets.solve
+    && dailyProgress.review >= dailyTargets.review;
+  const dailyCompletedCount = Number(dailyProgress.study >= dailyTargets.study)
+    + Number(dailyProgress.solve >= dailyTargets.solve)
+    + Number(dailyProgress.review >= dailyTargets.review);
+  const weekStartKey = localDateKey(weekStart);
+  const weekEndKey = localDateKey(weekEnd);
+  const weeklyScore = weeklyEventScore(studyEvents, weekStartKey, weekEndKey);
+  const weeklyCompleted = weeklyScore >= weeklyTarget;
+  const activeTimedRewards = timedRewardState.rewards.filter((reward) => new Date(reward.expiresAt).getTime() > clock);
+  const readyTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() <= clock);
+  const lockedTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() > clock);
+  const nextTimedReward = lockedTimedRewards[0];
+  const nextReview = upcomingReviews[0];
   const milestoneSteps = [10, 25, 50, 100, 250, 500];
   const unlockedMilestones = milestoneSteps.filter((step) => solved >= step);
   const completedRounds = activeMaterials.flatMap((material) =>
@@ -442,16 +850,131 @@ export default function Home() {
       .filter((problem) => filter === "all" || problem.status === filter),
   })) ?? [];
 
-  const grantPointAwards = (candidates: PointAward[]) => {
-    const existingKeys = new Set(pointAwards.map((award) => award.key));
-    const newAwards = candidates.filter((award) => !existingKeys.has(award.key));
-    if (newAwards.length === 0) return;
+  const firstStudyAwards = (today: string) => {
+    if (pointDays.includes(today)) return [];
+    const nextPointDays = [...pointDays, today];
+    const awards: PointAward[] = [{ key: `daily:${today}`, points: 5, label: "本日の初回学習", earnedOn: today }];
+    const nextStreak = streakFromDays(nextPointDays);
+    if (streakBonuses[nextStreak]) {
+      awards.push({ key: `streak:${nextStreak}`, points: streakBonuses[nextStreak], label: `${nextStreak}日連続学習`, earnedOn: today });
+    }
+    const previousDay = [...pointDays].filter((day) => day < today).sort().at(-1);
+    if (previousDay) {
+      const absenceDays = daysBetween(previousDay, today) - 1;
+      if (absenceDays >= 3) {
+        const points = absenceDays >= 14 ? 20 : absenceDays >= 7 ? 10 : 5;
+        awards.push({ key: `return:${today}`, points, label: `${absenceDays}日ぶりの学習再開`, earnedOn: today });
+      }
+    }
+    setPointDays(nextPointDays);
+    return awards;
+  };
+
+  const grantPointAwards = (candidates: PointAward[], eventCandidates: StudyEvent[] = []) => {
+    const existingEventIds = new Set(studyEvents.map((event) => event.id));
+    const newEvents = eventCandidates.filter((event) => !existingEventIds.has(event.id));
+    const nextEvents = [...studyEvents, ...newEvents];
+    const existingAwardKeys = new Set(pointAwards.map((award) => award.key));
+    const newAwards = candidates.filter((award) => !existingAwardKeys.has(award.key));
+    const prospectiveAwards = [...pointAwards, ...newAwards];
+    const automaticAwards: PointAward[] = [];
+    const nextDailyProgress = dailyEventProgress(nextEvents, todayKey);
+    if (
+      nextDailyProgress.study >= dailyTargets.study
+      && nextDailyProgress.solve >= dailyTargets.solve
+      && nextDailyProgress.review >= dailyTargets.review
+      && !prospectiveAwards.some((award) => award.key === `daily-goal:${todayKey}`)
+    ) {
+      automaticAwards.push({ key: `daily-goal:${todayKey}`, points: 10, label: "日次目標を達成", earnedOn: todayKey });
+    }
+    if (
+      weeklyEventScore(nextEvents, weekStartKey, weekEndKey) >= weeklyTarget
+      && !prospectiveAwards.some((award) => award.key === `weekly-goal:${weekStartKey}`)
+    ) {
+      automaticAwards.push({ key: `weekly-goal:${weekStartKey}`, points: 50, label: "週間達成目標を完了", earnedOn: todayKey });
+    }
+    const allNewAwards = [...newAwards, ...automaticAwards];
+    if (newEvents.length > 0) {
+      setStudyEvents(nextEvents);
+      const activityEvents = newEvents.filter((event) => event.type === "study" || event.type === "review");
+      if (activityEvents.length > 0) {
+        setActivity((days) => {
+          const next = { ...days };
+          activityEvents.forEach((event) => { next[event.date] = (next[event.date] ?? 0) + 1; });
+          return next;
+        });
+      }
+    }
+    if (allNewAwards.length === 0) return;
     setPointAwards((awards) => {
       const currentKeys = new Set(awards.map((award) => award.key));
-      return [...awards, ...candidates.filter((award) => !currentKeys.has(award.key))];
+      return [...awards, ...allNewAwards.filter((award) => !currentKeys.has(award.key))];
     });
-    const gained = newAwards.reduce((sum, award) => sum + award.points, 0);
-    setPointToast(`＋${gained} pt　${newAwards.map((award) => award.label).join("・")}`);
+    const gained = allNewAwards.reduce((sum, award) => sum + award.points, 0);
+    setPointToast(`＋${gained} pt　${allNewAwards.map((award) => award.label).join("・")}`);
+  };
+
+  const advanceTimedReward = () => {
+    setTimedRewardState((state) => {
+      const rewards = state.rewards.filter((reward) => new Date(reward.expiresAt).getTime() > clock);
+      const solvedProgress = state.solvedProgress + 1;
+      if (solvedProgress < timedRewardRequiredSolves) return { solvedProgress, rewards };
+      const unlockAt = new Date(clock + timedRewardDelayMs);
+      return {
+        solvedProgress: solvedProgress - timedRewardRequiredSolves,
+        rewards: [...rewards, {
+          id: `timed-${clock}-${rewards.length}`,
+          unlockAt: unlockAt.toISOString(),
+          expiresAt: new Date(unlockAt.getTime() + timedRewardWindowMs).toISOString(),
+        }],
+      };
+    });
+  };
+
+  const claimTimedReward = (reward: TimedReward) => {
+    const unlockTime = new Date(reward.unlockAt).getTime();
+    const expiresTime = new Date(reward.expiresAt).getTime();
+    if (clock < unlockTime || clock >= expiresTime) return;
+    setTimedRewardState((state) => ({
+      ...state,
+      rewards: state.rewards.filter((item) => item.id !== reward.id && new Date(item.expiresAt).getTime() > clock),
+    }));
+    grantPointAwards([{ key: `timed-reward:${reward.id}`, points: 15, label: "時限達成報酬を受領", earnedOn: todayKey }]);
+  };
+
+  const recordReview = (entry: ReviewEntry) => {
+    const problemKey = `${entry.material.id}:${entry.round}:${entry.chapter.id}:${entry.problem.id}`;
+    const reviewCount = entry.state.reviewCount ?? 0;
+    const reviewEvent: StudyEvent = {
+      id: `review:${todayKey}:${problemKey}:${reviewCount}`,
+      type: "review",
+      date: todayKey,
+      problemKey,
+    };
+    const awards: PointAward[] = [
+      ...firstStudyAwards(todayKey),
+      { key: `review:${problemKey}:${reviewCount}`, points: 3, label: "復習を記録", earnedOn: todayKey },
+    ];
+    if (entry.dueTime > 0 && clock <= entry.dueTime + 86400000) {
+      awards.push({ key: `review-timing:${problemKey}:${reviewCount}`, points: 2, label: "予定期間内に復習", earnedOn: todayKey });
+    }
+    const nextReviewCount = reviewCount + 1;
+    const nextInterval = reviewIntervals[Math.min(nextReviewCount, reviewIntervals.length - 1)];
+    const nextReviewAt = new Date(clock + nextInterval * 86400000).toISOString();
+    setMaterials((items) => items.map((material) => material.id !== entry.material.id ? material : {
+      ...material,
+      chapters: material.chapters.map((chapter) => chapter.id !== entry.chapter.id ? chapter : {
+        ...chapter,
+        problems: chapter.problems.map((problem) => problem.id !== entry.problem.id ? problem : withProblemState(problem, entry.round, {
+          ...entry.state,
+          status: entry.state.status === "with-answer" ? "with-answer" : "solved",
+          reviewCount: nextReviewCount,
+          reviewDueAt: nextReviewAt,
+          lastReviewedAt: new Date(clock).toISOString(),
+        })),
+      }),
+    }));
+    grantPointAwards(awards, [reviewEvent]);
   };
 
   const cycleProblem = (chapterId: string, problemId: number) => {
@@ -462,23 +985,23 @@ export default function Home() {
     const targetState = getProblemState(targetProblem, currentRound);
     const shouldRecord = !targetState.studiedOn;
     const nextStatus = statusOrder[(statusOrder.indexOf(targetState.status) + 1) % statusOrder.length];
-    const today = localDateKey();
-    const nextPointDays = pointDays.includes(today) ? pointDays : [...pointDays, today];
+    const today = todayKey;
     const awardId = `${current.id}:${currentRound}:${chapterId}:${problemId}`;
-    const awards: PointAward[] = [];
-    if (!pointDays.includes(today)) {
-      setPointDays(nextPointDays);
-      awards.push({ key: `daily:${today}`, points: 5, label: "今日の初学習", earnedOn: today });
-      const nextStreak = streakFromDays(nextPointDays);
-      if (streakBonuses[nextStreak]) {
-        awards.push({ key: `streak:${nextStreak}`, points: streakBonuses[nextStreak], label: `${nextStreak}日連続学習`, earnedOn: today });
-      }
-    }
+    const awards: PointAward[] = firstStudyAwards(today);
+    const events: StudyEvent[] = [{ id: `study:${today}:${awardId}`, type: "study", date: today, problemKey: awardId }];
     if (shouldRecord) {
       awards.push({ key: `start:${awardId}`, points: 1, label: "新しい問題に着手", earnedOn: today });
     }
     if (nextStatus === "solved") {
       awards.push({ key: `solve:${awardId}`, points: 2, label: "問題を解決", earnedOn: today });
+      events.push({ id: `solve:${today}:${awardId}`, type: "solve", date: today, problemKey: awardId });
+    }
+    const targetChapter = current.chapters.find((chapter) => chapter.id === chapterId)!;
+    const willCompleteChapter = isSolvedStatus(nextStatus) && targetChapter.problems.every((problem) =>
+      problem.id === problemId || isSolvedStatus(getProblemState(problem, currentRound).status),
+    );
+    if (willCompleteChapter) {
+      awards.push({ key: `chapter:${current.id}:${currentRound}:${chapterId}`, points: 15, label: `${targetChapter.title}を完了`, earnedOn: today });
     }
     const willCompleteRound = isSolvedStatus(nextStatus) && current.chapters.every((chapter) =>
       chapter.problems.every((problem) => {
@@ -487,9 +1010,19 @@ export default function Home() {
       }),
     );
     if (willCompleteRound) {
-      awards.push({ key: `complete:${current.id}:${currentRound}`, points: 50, label: `${current.title} 第${currentRound}周を完走`, earnedOn: today });
+      awards.push({ key: `complete:${current.id}:${currentRound}`, points: 50, label: `${current.title} 第${currentRound}周を完了`, earnedOn: today });
     }
-    grantPointAwards(awards);
+    const firstSolve = nextStatus === "solved" && !pointAwards.some((award) => award.key === `solve:${awardId}`);
+    grantPointAwards(awards, events);
+    if (firstSolve) advanceTimedReward();
+    let nextState: ProblemState = { ...targetState, studiedOn: targetState.studiedOn ?? today, status: nextStatus };
+    if (nextStatus === "solved") {
+      nextState = { ...nextState, reviewCount: 0, reviewDueAt: new Date(clock + reviewIntervals[0] * 86400000).toISOString(), lastReviewedAt: undefined };
+    } else if (nextStatus === "review") {
+      nextState = { ...nextState, reviewDueAt: new Date(clock).toISOString() };
+    } else if (nextStatus === "todo") {
+      nextState = { ...nextState, reviewCount: undefined, reviewDueAt: undefined, lastReviewedAt: undefined };
+    }
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -503,25 +1036,18 @@ export default function Home() {
                       ...chapter,
                       problems: chapter.problems.map((problem) => problem.id !== problemId
                         ? problem
-                        : withProblemState(problem, currentRound, {
-                            studiedOn: targetState.studiedOn ?? today,
-                            status: nextStatus,
-                          })),
+                        : withProblemState(problem, currentRound, nextState)),
                     },
               ),
             },
       ),
     );
-    if (shouldRecord) {
-      setActivity((days) => ({ ...days, [today]: (days[today] ?? 0) + 1 }));
-    }
   };
 
   const resetProblem = (chapterId: string, problemId: number) => {
-    const targetProblem = current.chapters
-      .find((chapter) => chapter.id === chapterId)
-      ?.problems.find((problem) => problem.id === problemId);
-    const studiedOn = targetProblem ? getProblemState(targetProblem, currentRound).studiedOn : undefined;
+    const problemKey = `${current.id}:${currentRound}:${chapterId}:${problemId}`;
+    const removedEvents = studyEvents.filter((event) => event.problemKey === problemKey);
+    const removedActivity = removedEvents.filter((event) => event.type === "study" || event.type === "review");
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -536,7 +1062,14 @@ export default function Home() {
                       problems: chapter.problems.map((problem) => {
                         if (problem.id !== problemId) return problem;
                         if (currentRound === 1) {
-                          return { ...problem, studiedOn: undefined, status: "todo" as Status };
+                          return {
+                            ...problem,
+                            studiedOn: undefined,
+                            status: "todo" as Status,
+                            reviewCount: undefined,
+                            reviewDueAt: undefined,
+                            lastReviewedAt: undefined,
+                          };
                         }
                         const rounds = { ...problem.rounds, [String(currentRound)]: { status: "todo" as Status } };
                         return { ...problem, rounds };
@@ -546,12 +1079,17 @@ export default function Home() {
             },
       ),
     );
-    if (studiedOn) {
+    if (removedEvents.length > 0) {
+      setStudyEvents((events) => events.filter((event) => event.problemKey !== problemKey));
+    }
+    if (removedActivity.length > 0) {
       setActivity((days) => {
         const next = { ...days };
-        const remaining = Math.max(0, (next[studiedOn!] ?? 0) - 1);
-        if (remaining === 0) delete next[studiedOn!];
-        else next[studiedOn!] = remaining;
+        removedActivity.forEach((event) => {
+          const remaining = Math.max(0, (next[event.date] ?? 0) - 1);
+          if (remaining === 0) delete next[event.date];
+          else next[event.date] = remaining;
+        });
         return next;
       });
     }
@@ -679,9 +1217,105 @@ export default function Home() {
     setExams((items) => items.filter((exam) => exam.id !== id));
   };
 
+  const sendSyncLoginLink = async () => {
+    if (!supabase || !syncEmail.trim()) return;
+    setSyncStatus("checking");
+    setSyncMessage("");
+    const redirectTo = `${window.location.origin}${window.location.pathname}`;
+    const { error } = await supabase.auth.signInWithOtp({
+      email: syncEmail.trim(),
+      options: { emailRedirectTo: redirectTo },
+    });
+    if (error) {
+      setSyncStatus("error");
+      setSyncMessage("確認メールを送信できませんでした。メールアドレスを確認してください。");
+      return;
+    }
+    setSyncStatus("local");
+    setSyncMessage("確認メールを送信しました。メール内のリンクを開いてください。");
+  };
+
+  const chooseCloudData = () => {
+    if (!pendingCloudData || !syncUserId) return;
+    if (!window.confirm("この端末の学習データを、クラウドに保存されている内容で置き換えますか？")) return;
+    applyStudySnapshot(pendingCloudData.snapshot);
+    localStorage.setItem("math-map-cloud-user", syncUserId);
+    lastSyncedAtRef.current = pendingCloudData.updatedAt;
+    setLastSyncedAt(pendingCloudData.updatedAt);
+    setPendingCloudData(null);
+    setSyncStatus("synced");
+    setSyncMessage("クラウドのデータをこの端末へ保存しました。");
+  };
+
+  const chooseLocalData = async () => {
+    if (!syncUserId) return;
+    if (!window.confirm("クラウドの学習データを、この端末の内容で置き換えますか？")) return;
+    setSyncStatus("checking");
+    try {
+      const updatedAt = await saveCloudSnapshot(syncUserId, latestSnapshotRef.current);
+      localStorage.setItem("math-map-cloud-user", syncUserId);
+      lastSyncedAtRef.current = updatedAt;
+      setLastSyncedAt(updatedAt);
+      setPendingCloudData(null);
+      setSyncStatus("synced");
+      setSyncMessage("この端末のデータをクラウドへ保存しました。");
+    } catch {
+      setSyncStatus("error");
+      setSyncMessage("クラウドへ保存できませんでした。再試行してください。");
+    }
+  };
+
+  const pullCloudData = async () => {
+    if (!syncUserId) return;
+    if (!window.confirm("この端末の学習データを、クラウドの最新内容で置き換えますか？")) return;
+    setSyncStatus("checking");
+    try {
+      const cloud = await loadCloudSnapshot(syncUserId);
+      if (!cloud) throw new Error("クラウドデータがありません");
+      applyStudySnapshot(cloud.snapshot);
+      localStorage.setItem("math-map-cloud-user", syncUserId);
+      lastSyncedAtRef.current = cloud.updatedAt;
+      setLastSyncedAt(cloud.updatedAt);
+      setSyncStatus("synced");
+      setSyncMessage("クラウドの最新データを反映しました。");
+    } catch {
+      setSyncStatus("error");
+      setSyncMessage("クラウドからデータを取得できませんでした。");
+    }
+  };
+
+  const pushLocalData = async () => {
+    if (!syncUserId) return;
+    if (!window.confirm("クラウドの学習データを、この端末の最新内容で置き換えますか？")) return;
+    setSyncStatus("checking");
+    try {
+      const updatedAt = await saveCloudSnapshot(syncUserId, latestSnapshotRef.current);
+      localStorage.setItem("math-map-cloud-user", syncUserId);
+      lastSyncedAtRef.current = updatedAt;
+      setLastSyncedAt(updatedAt);
+      setSyncStatus("synced");
+      setSyncMessage("この端末の最新データを保存しました。");
+    } catch {
+      setSyncStatus("error");
+      setSyncMessage("クラウドへデータを保存できませんでした。");
+    }
+  };
+
+  const disableCloudSync = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut({ scope: "local" });
+    localStorage.removeItem("math-map-cloud-user");
+    setSyncUser(null);
+    setSyncStatus("local");
+    setPendingCloudData(null);
+    setLastSyncedAt("");
+    lastSyncedAtRef.current = "";
+    setSyncMessage("クラウド同期を解除しました。データはこの端末に残っています。");
+  };
+
   const exportData = () => {
     const backup = {
-      version: 6,
+      version: 8,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -690,6 +1324,8 @@ export default function Home() {
       studyPoints,
       pointDays,
       pointAwards,
+      studyEvents,
+      timedRewardState,
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -715,6 +1351,10 @@ export default function Home() {
       const legacyPoints = !Array.isArray(parsed) && typeof parsed.studyPoints === "number" ? Math.max(0, parsed.studyPoints) : 0;
       setPointDays(restoredPointDays);
       setPointAwards(restoredPointAwards ?? migratePointAwards(restoredMaterials, restoredPointDays, legacyPoints));
+      const restoredStudyEvents = !Array.isArray(parsed) ? validStudyEvents(parsed.studyEvents) : null;
+      setStudyEvents(restoredStudyEvents ?? migrateStudyEvents(restoredActivity));
+      const restoredTimedRewards = !Array.isArray(parsed) ? validTimedRewardState(parsed.timedRewardState) : null;
+      setTimedRewardState(restoredTimedRewards ?? { solvedProgress: 0, rewards: [] });
       if (!Array.isArray(parsed) && parsed.goals) setGoals(parsed.goals);
       if (!Array.isArray(parsed)) {
         if (Array.isArray(parsed.exams)) setExams(parsed.exams);
@@ -732,6 +1372,14 @@ export default function Home() {
     }
   };
 
+  const syncButtonLabel = !cloudSyncConfigured
+    ? "端末保存"
+    : syncStatus === "checking"
+      ? "同期確認中"
+      : syncUser && syncStatus === "synced"
+        ? "同期済み"
+        : "クラウド同期";
+
   if (!current) return null;
 
   return (
@@ -744,7 +1392,7 @@ export default function Home() {
         <nav className="main-nav" aria-label="メインナビゲーション">
           <button className={`nav-item ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}><span>⌂</span>ホーム</button>
           <button className={`nav-item ${view === "materials" ? "active" : ""}`} onClick={() => setView("materials")}><span>▦</span>教材一覧</button>
-          <button className={`nav-item ${view === "review" ? "active" : ""}`} onClick={() => setView("review")}><span>↻</span>復習キュー <b>{review}</b></button>
+          <button className={`nav-item ${view === "review" ? "active" : ""}`} onClick={() => setView("review")}><span>↻</span>復習予定 <b>{review}</b></button>
           <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}><span>▥</span>学習記録</button>
           <button className={`nav-item ${view === "goals" ? "active" : ""}`} onClick={() => setView("goals")}><span>◎</span>目標・実績</button>
           <button className={`nav-item ${view === "exam" ? "active" : ""}`} onClick={() => setView("exam")}><span>旗</span>試験モード</button>
@@ -782,6 +1430,9 @@ export default function Home() {
             <h1>おかえりなさい。</h1>
           </div>
           <div className="top-actions">
+            <button className={`sync-button ${syncStatus === "synced" ? "connected" : ""}`} onClick={() => setSyncOpen(true)}>
+              <i aria-hidden="true" />{syncButtonLabel}
+            </button>
             <button className="icon-button" aria-label="テーマを切り替える" onClick={() => setDark((v) => !v)}>
               {dark ? "☀" : "☾"}
             </button>
@@ -834,19 +1485,25 @@ export default function Home() {
 
         {view === "review" && (
           <section className="view-panel">
-            <div className="view-heading"><div><p className="eyebrow">REVIEW QUEUE</p><h2>復習キュー</h2><p>{review}問が復習を待っています</p></div></div>
+            <div className="view-heading"><div><p className="eyebrow">REVIEW SCHEDULE</p><h2>復習予定</h2><p>復習可能 {dueReviews.length}問・今後の予定 {upcomingReviews.length}問</p></div></div>
             <div className="review-list">
-              {activeMaterials.flatMap((material) => {
-                const round = getActiveRound(material);
-                return material.chapters.flatMap((chapter) => chapter.problems.filter((problem) => getProblemState(problem, round).status === "review").map((problem) => (
-                  <article className="review-item" key={`${material.id}-${round}-${chapter.id}-${problem.id}`}>
-                    <span className="review-number">{problem.id}</span>
-                    <div><small>{material.title}・第{round}周</small><h3>{chapter.title}・問題 {problem.id}</h3></div>
-                    <button className="secondary-button" onClick={() => { setSelected(material.id); setView("home"); setFilter("review"); }}>問題を開く</button>
+              {reviewEntries.slice(0, 80).map((entry) => {
+                const due = entry.dueTime <= clock;
+                return (
+                  <article className="review-item" key={`${entry.material.id}-${entry.round}-${entry.chapter.id}-${entry.problem.id}`}>
+                    <span className="review-number">{entry.problem.id}</span>
+                    <div>
+                      <small>{entry.material.title}・第{entry.round}周</small>
+                      <h3>{entry.chapter.title}・問題 {entry.problem.id}</h3>
+                      <p className={due ? "review-time due" : "review-time"}>{due ? "復習可能" : `予定まで ${formatRemaining(entry.dueTime - clock)}`}</p>
+                    </div>
+                    {due
+                      ? <button className="secondary-button" onClick={() => recordReview(entry)}>復習を記録</button>
+                      : <button className="secondary-button" onClick={() => { setMaterialRound(entry.material.id, entry.round); setSelected(entry.material.id); setView("home"); }}>対象問題を開く</button>}
                   </article>
-                )));
+                );
               })}
-              {review === 0 && <div className="empty-state"><strong>復習待ちはありません</strong><p>問題マスを「復習待ち」にすると、ここにまとまります。</p></div>}
+              {reviewEntries.length === 0 && <div className="empty-state"><strong>復習予定はありません</strong><p>解決した問題には、次回の復習予定が自動で設定されます。</p></div>}
             </div>
           </section>
         )}
@@ -887,26 +1544,30 @@ export default function Home() {
                 </div>
               </article>
               <article className="streak-card">
-                <span className="streak-icon">✦</span>
                 <p>現在の連続学習</p>
                 <strong>{streak}<small>日</small></strong>
-                <span>{streak > 0 ? "今日も一歩ずつ続けよう" : "今日1問解くとスタート"}</span>
+                <span>{streak > 0 ? "本日の学習状況を記録済み" : "1問記録すると継続日数が始まります"}</span>
               </article>
               <article className="point-card">
-                <span className="point-icon">◆</span>
                 <p>累計ポイント</p>
                 <strong>{studyPoints}<small> pt</small></strong>
-                <span>問題・継続・完走でポイント</span>
+                <span>学習記録と目標達成に応じて加算</span>
               </article>
             </div>
             <section className="point-rules-section">
-              <div className="section-heading"><div><p className="eyebrow">POINT RULES</p><h3>ポイントの貯め方</h3></div><span>同じ記録からの重複獲得はありません</span></div>
+              <div className="section-heading"><div><p className="eyebrow">POINT RULES</p><h3>ポイントの加算条件</h3></div><span>同じ記録からの重複加算はありません</span></div>
               <div className="point-rules">
-                <article><span>☀</span><div><strong>今日の初学習</strong><small>その日のスタート</small></div><b>＋5 pt</b></article>
-                <article><span>↗</span><div><strong>新しい問題に着手</strong><small>1問・1周につき初回</small></div><b>＋1 pt</b></article>
-                <article><span>✓</span><div><strong>問題を解決</strong><small>1問・1周につき初回</small></div><b>＋2 pt</b></article>
-                <article><span>✦</span><div><strong>連続学習</strong><small>3・7・14・30日など</small></div><b>＋3〜300 pt</b></article>
-                <article><span>旗</span><div><strong>教材を100%完走</strong><small>教材の1周ごと</small></div><b>＋50 pt</b></article>
+                <article><div><strong>本日の初回学習</strong><small>1日につき1回</small></div><b>＋5 pt</b></article>
+                <article><div><strong>新しい問題に着手</strong><small>1問・1周につき初回</small></div><b>＋1 pt</b></article>
+                <article><div><strong>問題を解決</strong><small>1問・1周につき初回</small></div><b>＋2 pt</b></article>
+                <article><div><strong>復習を記録</strong><small>予定後24時間以内はさらに＋2 pt</small></div><b>＋3 pt</b></article>
+                <article><div><strong>章を完了</strong><small>章の1周ごと</small></div><b>＋15 pt</b></article>
+                <article><div><strong>教材を100%完了</strong><small>教材の1周ごと</small></div><b>＋50 pt</b></article>
+                <article><div><strong>連続学習</strong><small>3・7・14・30日など</small></div><b>＋3〜300 pt</b></article>
+                <article><div><strong>学習再開</strong><small>3〜6日＋5・7〜13日＋10・14日以上＋20</small></div><b>＋5〜20 pt</b></article>
+                <article><div><strong>日次目標を完了</strong><small>学習3・解決2・復習1</small></div><b>＋10 pt</b></article>
+                <article><div><strong>週間達成目標を完了</strong><small>学習1・解決3・復習2の合計100</small></div><b>＋50 pt</b></article>
+                <article><div><strong>時限達成報酬を受領</strong><small>5問の初回解決後、3時間後から24時間</small></div><b>＋15 pt</b></article>
               </div>
             </section>
             <section className="milestone-section">
@@ -916,7 +1577,7 @@ export default function Home() {
                   const unlocked = solved >= step;
                   return <article className={unlocked ? "unlocked" : ""} key={step}><span>{unlocked ? "✓" : "◇"}</span><strong>{step}問 解決</strong><small>{unlocked ? "達成しました" : `${Math.min(solved, step)} / ${step}問`}</small></article>;
                 })}
-                <article className={completedRounds > 0 ? "unlocked" : ""}><span>{completedRounds > 0 ? "✓" : "◇"}</span><strong>教材を完走</strong><small>{completedRounds > 0 ? `${completedRounds}周達成` : "最初の1周を100%へ"}</small></article>
+                <article className={completedRounds > 0 ? "unlocked" : ""}><span>{completedRounds > 0 ? "✓" : "◇"}</span><strong>教材の周回完了</strong><small>{completedRounds > 0 ? `${completedRounds}周完了` : "最初の1周を100%へ"}</small></article>
               </div>
             </section>
           </section>
@@ -970,7 +1631,7 @@ export default function Home() {
               <h2>積み重ねが、<br />見える形になってきました。</h2>
               <div className="mini-stats">
                 <span><b>{solved}</b> 解決済み</span>
-                <span><b>{review}</b> 復習待ち</span>
+                <span><b>{review}</b> 復習可能</span>
                 <span><b>{activeMaterials.length}</b> 教材</span>
               </div>
             </div>
@@ -989,11 +1650,45 @@ export default function Home() {
         </section>
 
         <section className="quick-stats" aria-label="目標と実績">
-          <button className="point-quick" onClick={() => setView("goals")}><span>累計ポイント</span><strong>{studyPoints}<small> pt</small></strong><em>{pointDays.includes(localDateKey()) ? "今日の初学習ボーナス獲得済み" : "今日の最初の学習で＋5"}</em></button>
+          <button className="point-quick" onClick={() => setView("goals")}><span>累計ポイント</span><strong>{studyPoints}<small> pt</small></strong><em>{pointDays.includes(todayKey) ? "本日の初回学習を記録済み" : "本日の初回学習で＋5 pt"}</em></button>
           <button onClick={() => setView("goals")}><span>今週の目標</span><strong>{weekCount}<small> / {goals.weekly}問</small></strong><i><b style={{ width: `${goalPercent(weekCount, goals.weekly)}%` }} /></i></button>
-          <button onClick={() => setView("goals")}><span>連続学習</span><strong>{streak}<small>日</small></strong><em>自己ベストを伸ばそう</em></button>
-          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{unlockedMilestones.length + (completedRounds > 0 ? 1 : 0)}<small>個獲得</small></strong><em>{nextMilestone ? `次は${nextMilestone}問` : "すべて達成"}</em></button>
+          <button onClick={() => setView("goals")}><span>連続学習</span><strong>{streak}<small>日</small></strong><em>学習記録の連続日数</em></button>
+          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{unlockedMilestones.length + (completedRounds > 0 ? 1 : 0)}<small>項目完了</small></strong><em>{nextMilestone ? `次は${nextMilestone}問` : "全項目を完了"}</em></button>
           {nextExam && <button className="exam-quick" onClick={() => setView("exam")}><span>{nextExam.name.trim() || "直近の試験"}</span><strong>{nextExamDays === null ? "日付未設定" : nextExamDays >= 0 ? `あと${nextExamDays}日` : "試験終了"}</strong><em>{nextExamMaterial?.title}</em></button>}
+        </section>
+
+        <section className="time-overview" aria-label="期限と達成状況">
+          <article className="time-card">
+            <header><span>復習予定</span><strong>{dueReviews.length}<small>問</small></strong></header>
+            <p>{dueReviews.length > 0 ? "現在復習できます" : nextReview ? `次の予定まで ${formatRemaining(nextReview.dueTime - clock)}` : "予定はありません"}</p>
+            <button className="secondary-button" onClick={() => setView("review")}>復習予定を確認</button>
+          </article>
+          <article className={`time-card ${dailyCompleted ? "complete" : ""}`}>
+            <header><span>日次目標</span><strong>{dailyCompletedCount}<small> / 3項目</small></strong></header>
+            <div className="time-progress"><i style={{ width: `${Math.round((dailyCompletedCount / 3) * 100)}%` }} /></div>
+            <p>学習 {Math.min(dailyProgress.study, dailyTargets.study)}/{dailyTargets.study}・解決 {Math.min(dailyProgress.solve, dailyTargets.solve)}/{dailyTargets.solve}・復習 {Math.min(dailyProgress.review, dailyTargets.review)}/{dailyTargets.review}</p>
+            <em>{dailyCompleted ? "完了済み・＋10 pt" : "3項目の完了で＋10 pt"}</em>
+          </article>
+          <article className={`time-card ${weeklyCompleted ? "complete" : ""}`}>
+            <header><span>週間達成目標</span><strong>{Math.min(weeklyScore, weeklyTarget)}<small> / {weeklyTarget}</small></strong></header>
+            <div className="time-progress"><i style={{ width: `${Math.min(100, Math.round((weeklyScore / weeklyTarget) * 100))}%` }} /></div>
+            <p>学習＋1・解決＋3・復習＋2<br />締切まで {formatRemaining(weekEnd.getTime() - clock)}</p>
+            <em>{weeklyCompleted ? "完了済み・＋50 pt" : "完了時に＋50 pt"}</em>
+          </article>
+          <article className={`time-card ${readyTimedRewards.length > 0 ? "complete" : ""}`}>
+            <header>
+              <span>時限達成報酬</span>
+              <strong>{readyTimedRewards.length > 0 ? readyTimedRewards.length : timedRewardState.solvedProgress}<small>{readyTimedRewards.length > 0 ? "件" : ` / ${timedRewardRequiredSolves}問`}</small></strong>
+            </header>
+            <p>{readyTimedRewards.length > 0
+              ? `受取期限まで ${formatRemaining(new Date(readyTimedRewards[0].expiresAt).getTime() - clock)}`
+              : nextTimedReward
+                ? `受取可能まで ${formatRemaining(new Date(nextTimedReward.unlockAt).getTime() - clock)}`
+                : "5問の初回解決で受取予定を設定"}</p>
+            {readyTimedRewards.length > 0
+              ? <button className="secondary-button" onClick={() => claimTimedReward(readyTimedRewards[0])}>＋15 ptを受け取る</button>
+              : <em>受取可能後24時間</em>}
+          </article>
         </section>
 
         <section className="material-head">
@@ -1030,15 +1725,16 @@ export default function Home() {
           <div className="chapters">
             {filteredChapters.map((chapter) => {
               const original = current.chapters.find((c) => c.id === chapter.id)!;
+              const chapterPercent = pct([original], currentRound);
               return (
-                <article className="chapter-card" key={chapter.id}>
+                <article className={`chapter-card ${chapterPercent === 100 ? "completed" : ""}`} key={chapter.id}>
                   <div className="chapter-row">
                     <div className="chapter-info">
-                      <h4>{chapter.title}</h4><p>{original.problems.length}問中 {original.problems.filter((problem) => { const state = getProblemState(problem, currentRound); return state.status === "solved" || state.status === "with-answer"; }).length}問 解決</p>
+                      <h4>{chapter.title}{chapterPercent === 100 && <span className="chapter-complete-label">完了</span>}</h4><p>{original.problems.length}問中 {original.problems.filter((problem) => { const state = getProblemState(problem, currentRound); return state.status === "solved" || state.status === "with-answer"; }).length}問 解決</p>
                     </div>
                     <div className="chapter-pct">
-                      <span>{pct([original], currentRound)}%</span>
-                      <div><i style={{ width: `${pct([original], currentRound)}%`, background: current.color }} /></div>
+                      <span>{chapterPercent}%</span>
+                      <div><i style={{ width: `${chapterPercent}%`, background: current.color }} /></div>
                     </div>
                   </div>
                   <div className="problem-grid">
@@ -1071,6 +1767,71 @@ export default function Home() {
         </section>
         </>)}
       </section>
+
+      {syncOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setSyncOpen(false)}>
+          <div className="modal sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" onMouseDown={(event) => event.stopPropagation()}>
+            <button className="modal-close" aria-label="閉じる" onClick={() => setSyncOpen(false)}>×</button>
+            <p className="eyebrow">DATA SYNC</p>
+            <h2 id="sync-title">端末間同期</h2>
+
+            {!cloudSyncConfigured && (
+              <div className="sync-state-panel">
+                <strong>現在は端末内に保存しています</strong>
+                <p>クラウド同期の接続情報が設定されていない場合も、これまでどおりすべての機能を利用できます。</p>
+              </div>
+            )}
+
+            {cloudSyncConfigured && !syncUser && (
+              <div className="sync-login">
+                <p>PCとスマートフォンで同じメールアドレスを使用すると、同じ学習データを利用できます。</p>
+                <label>メールアドレス<input type="email" autoComplete="email" value={syncEmail} onChange={(event) => setSyncEmail(event.target.value)} placeholder="name@example.com" /></label>
+                <button className="primary-button wide" disabled={!syncEmail.trim() || syncStatus === "checking"} onClick={() => { void sendSyncLoginLink(); }}>{syncStatus === "checking" ? "送信中" : "確認メールを送信"}</button>
+                <small>パスワードの登録は不要です。届いたメール内のリンクからログインします。</small>
+              </div>
+            )}
+
+            {cloudSyncConfigured && syncUser && (
+              <div className="sync-account">
+                <div className="sync-account-head">
+                  <div><small>ログイン中</small><strong>{syncUser.email}</strong></div>
+                  <span className={syncStatus === "synced" ? "connected" : ""}>{syncStatus === "synced" ? "自動同期中" : syncStatus === "checking" ? "確認中" : "設定が必要"}</span>
+                </div>
+
+                {syncStatus === "choose" && pendingCloudData && (
+                  <div className="sync-choice">
+                    <strong>最初に使用するデータを選択してください</strong>
+                    <p>選ばなかった側のデータは置き換わります。必要に応じて先にJSONバックアップを書き出してください。</p>
+                    <button className="sync-choice-button" onClick={chooseCloudData}><span>クラウドのデータを使う</span><small>更新日時 {new Date(pendingCloudData.updatedAt).toLocaleString("ja-JP")}</small></button>
+                    <button className="sync-choice-button" onClick={() => { void chooseLocalData(); }}><span>この端末のデータを使う</span><small>現在表示されている教材と学習記録を保存</small></button>
+                  </div>
+                )}
+
+                {syncStatus === "checking" && <div className="sync-state-panel"><strong>データを確認しています</strong><p>完了するまでこの画面を閉じずにお待ちください。</p></div>}
+
+                {syncStatus === "synced" && (
+                  <div className="sync-controls">
+                    <div className="sync-state-panel"><strong>変更は自動的に同期されます</strong><p>{lastSyncedAt ? `最終同期 ${new Date(lastSyncedAt).toLocaleString("ja-JP")}` : "同期時刻を確認しています"}</p></div>
+                    <div className="sync-control-buttons">
+                      <button className="secondary-button" onClick={() => { void pullCloudData(); }}>クラウドから取り込む</button>
+                      <button className="secondary-button" onClick={() => { void pushLocalData(); }}>この端末から保存</button>
+                    </div>
+                  </div>
+                )}
+
+                {syncStatus === "error" && (
+                  <div className="sync-state-panel error"><strong>自動同期を確認できません</strong><p>学習データは引き続きこの端末に保存されています。</p><button className="secondary-button" onClick={() => setSyncRefresh((value) => value + 1)}>再試行</button></div>
+                )}
+
+                <button className="sync-disable" onClick={() => { void disableCloudSync(); }}>クラウド同期を解除</button>
+              </div>
+            )}
+
+            {syncMessage && <p className="sync-message" role="status" aria-live="polite">{syncMessage}</p>}
+            <p className="modal-note">クラウド同期を解除しても、この端末のデータとJSONバックアップ機能は残ります。</p>
+          </div>
+        </div>
+      )}
 
       {adding && (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setAdding(false)}>
