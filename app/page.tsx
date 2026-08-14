@@ -1771,7 +1771,7 @@ export default function Home() {
             </div>
             <div className="overall-copy">
               <p>今週の学習</p>
-              <h2>積み重ねが、<br />見える形になってきました。</h2>
+              <h2>継続は力なり</h2>
               <div className="mini-stats">
                 <span><b>{solved}</b> 完了</span>
                 <span><b>{review}</b> 復習可能</span>
@@ -1787,7 +1787,7 @@ export default function Home() {
 
           <article className="heat-card">
             <div className="card-heading">
-              <div><p>学習の足あと</p><h3>直近7週間</h3></div>
+              <div><p>学習のあしあと</p><h3>直近7週間</h3></div>
               <span>今日 {todayCount}件</span>
             </div>
             <div className="heatmap" aria-label="学習ヒートマップ">
