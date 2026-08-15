@@ -250,13 +250,23 @@ button { color: inherit; }
 .point-rules b { margin-left: auto; white-space: nowrap; color: var(--accent); font: 700 12px Georgia, serif; }
 .milestone-section { margin-top: 25px; }
 .section-heading .eyebrow { margin-bottom: 4px; }
-.milestone-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 9px; }
-.milestone-grid article { display: grid; justify-items: center; text-align: center; gap: 7px; padding: 19px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); opacity: .6; }
-.milestone-grid article > span { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; background: var(--paper); color: var(--muted); }
-.milestone-grid strong { font-size: 11px; }
-.milestone-grid small { color: var(--muted); font-size: 8px; }
-.milestone-grid article.unlocked { opacity: 1; border-color: #7eb3f7; box-shadow: inset 0 3px #3b82f6; }
-.milestone-grid article.unlocked > span { color: white; background: var(--accent); }
+.milestone-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.milestone-kind { display: grid; gap: 13px; padding: 17px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.milestone-kind.has-achievement { border-color: #91b9ea; }
+.milestone-kind.unlocked { border-color: #6b9edc; box-shadow: inset 0 3px var(--accent); }
+.milestone-kind-head { display: flex; align-items: center; gap: 10px; }
+.milestone-kind-head > span { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; background: var(--paper); color: var(--muted); font: 700 10px Georgia, serif; }
+.milestone-kind.has-achievement .milestone-kind-head > span { background: var(--accent); color: white; }
+.milestone-kind-head > div { display: grid; gap: 3px; }
+.milestone-kind-head strong { font-size: 11px; }
+.milestone-kind-head small { color: var(--muted); font-size: 8px; }
+.milestone-value { display: flex; align-items: baseline; gap: 4px; }
+.milestone-value b { font: 700 27px/1 Georgia, serif; }
+.milestone-value small { color: var(--muted); font-size: 9px; }
+.milestone-levels { display: flex; flex-wrap: wrap; gap: 5px; }
+.milestone-levels span { min-width: 34px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font: 600 9px Georgia, serif; text-align: center; }
+.milestone-levels span.achieved { border-color: #72a8e9; background: #e6f1ff; color: #184c8e; }
+.milestone-kind p { margin: 0; color: var(--muted); font-size: 8px; }
 
 .exam-list { display: grid; gap: 14px; }
 .exam-card { display: grid; grid-template-columns: 1.15fr .85fr; border: 1px solid var(--line); background: var(--card); border-radius: 15px; overflow: hidden; }
@@ -353,6 +363,7 @@ button { color: inherit; }
 .dark .book-title > span, .dark .book-chip, .dark .problem.solved { color: white; }
 .dark .review-number { background: #183455; color: white; border-color: #75aaec; }
 .dark .chapter-complete-label { color: #9cc7ff; border-color: #5d94d8; }
+.dark .milestone-levels span.achieved { background: #1f4a7e; color: white; border-color: #659ee4; }
 
 .point-toast { position: fixed; right: 24px; bottom: 24px; z-index: 20; max-width: min(460px, calc(100vw - 40px)); padding: 14px 18px; border: 1px solid #72aaf2; border-radius: 12px; background: #102f57; color: white; box-shadow: 0 14px 40px rgba(8, 38, 77, .28); font-size: 11px; font-weight: 700; animation: point-pop .22s ease-out; }
 @keyframes point-pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }

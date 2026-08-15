@@ -29,3 +29,12 @@ test("supports reading and exercise tracks in one material", async () => {
   assert.match(source, /className="track-switch"/);
   assert.match(source, /currentMode === "exercise" && <option value="review-due">復習可能<\/option>/);
 });
+
+test("provides milestone categories for different study records", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  for (const label of ["完了単位", "演習の解決", "読書の完了", "復習の記録", "累計学習日", "連続学習", "章の完了", "周回の完了", "累計ポイント"]) {
+    assert.match(source, new RegExp(label));
+  }
+  assert.match(source, /milestone-levels/);
+  assert.match(source, /段階を達成/);
+});
