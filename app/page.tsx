@@ -17,7 +17,7 @@ type ProblemState = {
   lastReviewedAt?: string;
 };
 type Problem = ProblemState & { id: number; rounds?: Record<string, ProblemState> };
-type Chapter = { id: string; title: string; problems: Problem[] };
+type Chapter = { id: string; title: string; problems: Problem[]; readingItems?: Problem[] };
 type Material = {
   id: string;
   title: string;
@@ -26,13 +26,22 @@ type Material = {
   chapters: Chapter[];
   studyMode?: StudyMode;
   unit?: StudyUnit;
+  activeTrack?: StudyMode;
+  exerciseEnabled?: boolean;
+  readingEnabled?: boolean;
+  exerciseUnit?: StudyUnit;
+  readingUnit?: StudyUnit;
+  exerciseRoundCount?: number;
+  exerciseActiveRound?: number;
+  readingRoundCount?: number;
+  readingActiveRound?: number;
   archived?: boolean;
   roundCount?: number;
   activeRound?: number;
 };
 type View = "home" | "materials" | "review" | "history" | "goals" | "exam";
 type ProblemFilter = Status | "review-due" | "all";
-type ChapterDraft = { title: string; count: number };
+type ChapterDraft = { id?: string; title: string; exerciseCount: number; readingCount: number };
 type Goals = { weekly: number; monthly: number };
 type ExamSettings = { id: string; enabled: boolean; name: string; date: string; materialId: string; round?: number };
 type PointAward = { key: string; points: number; label: string; earnedOn: string };
@@ -51,6 +60,7 @@ type ReviewEntry = {
   round: number;
   state: ProblemState;
   dueTime: number;
+  mode: "exercise";
 };
 type StudySnapshot = {
   version: number;
@@ -111,24 +121,55 @@ const readingStatusLabel: Record<Status, string> = {
   "with-answer": "読了",
 };
 
+function getPrimaryMode(material: Material): StudyMode {
+  return material.studyMode === "reading" ? "reading" : "exercise";
+}
+
+function isTrackEnabled(material: Material, mode: StudyMode) {
+  if (mode === "exercise" && typeof material.exerciseEnabled === "boolean") return material.exerciseEnabled;
+  if (mode === "reading" && typeof material.readingEnabled === "boolean") return material.readingEnabled;
+  return getPrimaryMode(material) === mode;
+}
+
+function getEnabledModes(material: Material): StudyMode[] {
+  return (["reading", "exercise"] as StudyMode[]).filter((mode) => isTrackEnabled(material, mode));
+}
+
 function getStudyMode(material: Material): StudyMode {
-  return material.studyMode ?? "exercise";
+  if (material.activeTrack && isTrackEnabled(material, material.activeTrack)) return material.activeTrack;
+  const primary = getPrimaryMode(material);
+  return isTrackEnabled(material, primary) ? primary : getEnabledModes(material)[0] ?? "exercise";
 }
 
-function getStudyUnit(material: Material): StudyUnit {
-  return material.unit ?? (getStudyMode(material) === "reading" ? "節" : "問");
+function getStudyUnit(material: Material, mode = getStudyMode(material)): StudyUnit {
+  const explicit = mode === "reading" ? material.readingUnit : material.exerciseUnit;
+  if (explicit) return explicit;
+  if (getPrimaryMode(material) === mode && material.unit) return material.unit;
+  return mode === "reading" ? "節" : "問";
 }
 
-function getStatusOrder(material: Material) {
-  return getStudyMode(material) === "reading" ? statusOrder.filter((status) => status !== "with-answer") : statusOrder;
+function getChapterItems(chapter: Chapter, mode: StudyMode) {
+  return mode === "reading" ? chapter.readingItems ?? [] : chapter.problems;
 }
 
-function getStatusLabel(material: Material, status: Status) {
-  return getStudyMode(material) === "reading" ? readingStatusLabel[status] : exerciseStatusLabel[status];
+function withChapterItems(chapter: Chapter, mode: StudyMode, items: Problem[]): Chapter {
+  return mode === "reading" ? { ...chapter, readingItems: items } : { ...chapter, problems: items };
 }
 
-function getCompletionLabel(material: Material) {
-  return getStudyMode(material) === "reading" ? "読了" : "解決";
+function getTrackLabel(mode: StudyMode) {
+  return mode === "reading" ? "読む" : "演習";
+}
+
+function getStatusOrder(material: Material, mode = getStudyMode(material)) {
+  return mode === "reading" ? statusOrder.filter((status) => status !== "with-answer") : statusOrder;
+}
+
+function getStatusLabel(material: Material, status: Status, mode = getStudyMode(material)) {
+  return mode === "reading" ? readingStatusLabel[status] : exerciseStatusLabel[status];
+}
+
+function getCompletionLabel(material: Material, mode = getStudyMode(material)) {
+  return mode === "reading" ? "読了" : "解決";
 }
 
 const seedReviewDueAt = "2025-01-01T00:00:00.000Z";
@@ -245,12 +286,16 @@ function sumActivity(activity: Record<string, number>, from: Date, to: Date) {
   }, 0);
 }
 
-function getRoundCount(material: Material) {
-  return Math.max(1, material.roundCount ?? 1);
+function getRoundCount(material: Material, mode = getStudyMode(material)) {
+  const explicit = mode === "reading" ? material.readingRoundCount : material.exerciseRoundCount;
+  const legacy = getPrimaryMode(material) === mode ? material.roundCount : undefined;
+  return Math.max(1, explicit ?? legacy ?? 1);
 }
 
-function getActiveRound(material: Material) {
-  return Math.min(getRoundCount(material), Math.max(1, material.activeRound ?? 1));
+function getActiveRound(material: Material, mode = getStudyMode(material)) {
+  const explicit = mode === "reading" ? material.readingActiveRound : material.exerciseActiveRound;
+  const legacy = getPrimaryMode(material) === mode ? material.activeRound : undefined;
+  return Math.min(getRoundCount(material, mode), Math.max(1, explicit ?? legacy ?? 1));
 }
 
 function getProblemState(problem: Problem, round: number): ProblemState {
@@ -311,19 +356,38 @@ function normalizeMaterials(value: unknown): Material[] | null {
       const unit: StudyUnit = candidate.unit === "節" || candidate.unit === "ページ" || candidate.unit === "項目"
         ? candidate.unit
         : "問";
+      const exerciseEnabled = typeof candidate.exerciseEnabled === "boolean" ? candidate.exerciseEnabled : studyMode === "exercise";
+      const readingEnabled = typeof candidate.readingEnabled === "boolean" ? candidate.readingEnabled : studyMode === "reading";
+      const activeTrack = candidate.activeTrack === "reading" && readingEnabled
+        ? "reading"
+        : candidate.activeTrack === "exercise" && exerciseEnabled
+          ? "exercise"
+          : studyMode === "reading" && readingEnabled
+            ? "reading"
+            : exerciseEnabled
+              ? "exercise"
+              : "reading";
       if (!Array.isArray(candidate.chapters) || candidate.chapters.length === 0) throw new Error("invalid chapters");
       const chapters = candidate.chapters.map((rawChapter, chapterIndex) => {
         if (!rawChapter || typeof rawChapter !== "object" || !Array.isArray(rawChapter.problems)) throw new Error("invalid chapter");
-        const problems = rawChapter.problems.map((rawProblem, problemIndex) => {
+        const normalizeRawItems = (items: unknown[], mode: StudyMode) => items.map((rawProblem, problemIndex) => {
           if (!rawProblem || typeof rawProblem !== "object") throw new Error("invalid problem");
           const problem = rawProblem as Problem;
-          return normalizeProblem({ ...problem, id: typeof problem.id === "number" ? problem.id : problemIndex + 1 }, studyMode);
+          return normalizeProblem({ ...problem, id: typeof problem.id === "number" ? problem.id : problemIndex + 1 }, mode);
         });
+        const rawReadingItems = Array.isArray(rawChapter.readingItems) ? rawChapter.readingItems : null;
+        const readingItems = rawReadingItems
+          ? normalizeRawItems(rawReadingItems, "reading")
+          : studyMode === "reading"
+            ? normalizeRawItems(rawChapter.problems, "reading")
+            : [];
+        const problems = studyMode === "reading" && !rawReadingItems ? [] : normalizeRawItems(rawChapter.problems, "exercise");
         return {
           ...rawChapter,
           id: typeof rawChapter.id === "string" ? rawChapter.id : `chapter-${materialIndex}-${chapterIndex}`,
           title: typeof rawChapter.title === "string" ? rawChapter.title : `第${chapterIndex + 1}章`,
           problems,
+          readingItems,
         };
       });
       return {
@@ -334,6 +398,15 @@ function normalizeMaterials(value: unknown): Material[] | null {
         color: typeof candidate.color === "string" ? candidate.color : "#3b82f6",
         studyMode,
         unit: studyMode === "reading" && candidate.unit === undefined ? "節" : unit,
+        activeTrack,
+        exerciseEnabled,
+        readingEnabled,
+        exerciseUnit: candidate.exerciseUnit ?? (studyMode === "exercise" ? unit : "問"),
+        readingUnit: candidate.readingUnit ?? (studyMode === "reading" ? (candidate.unit ?? "節") : "節"),
+        exerciseRoundCount: candidate.exerciseRoundCount ?? (studyMode === "exercise" ? candidate.roundCount : undefined),
+        exerciseActiveRound: candidate.exerciseActiveRound ?? (studyMode === "exercise" ? candidate.activeRound : undefined),
+        readingRoundCount: candidate.readingRoundCount ?? (studyMode === "reading" ? candidate.roundCount : undefined),
+        readingActiveRound: candidate.readingActiveRound ?? (studyMode === "reading" ? candidate.activeRound : undefined),
         chapters,
       };
     });
@@ -342,13 +415,29 @@ function normalizeMaterials(value: unknown): Material[] | null {
   }
 }
 
-function pct(chapters: Chapter[], round = 1) {
-  const all = chapters.flatMap((c) => c.problems);
+function pct(chapters: Chapter[], round = 1, mode: StudyMode = "exercise") {
+  const all = chapters.flatMap((chapter) => getChapterItems(chapter, mode));
   const done = all.filter((problem) => {
     const state = getProblemState(problem, round);
     return state.status === "solved" || state.status === "with-answer";
   }).length;
   return all.length ? Math.round((done / all.length) * 100) : 0;
+}
+
+function materialPct(material: Material) {
+  const modes = getEnabledModes(material);
+  if (modes.length === 0) return 0;
+  return Math.round(modes.reduce((sum, mode) => sum + pct(material.chapters, getActiveRound(material, mode), mode), 0) / modes.length);
+}
+
+function trackAwardId(material: Material, mode: StudyMode, round: number, chapterId: string, itemId?: number) {
+  const modePart = mode === getPrimaryMode(material) ? "" : `:${mode}`;
+  return `${material.id}${modePart}:${round}:${chapterId}${itemId === undefined ? "" : `:${itemId}`}`;
+}
+
+function trackRoundAwardId(material: Material, mode: StudyMode, round: number) {
+  const modePart = mode === getPrimaryMode(material) ? "" : `:${mode}`;
+  return `${material.id}${modePart}:${round}`;
 }
 
 function studiedDays(activity: Record<string, number>) {
@@ -540,26 +629,28 @@ function migratePointAwards(materials: Material[], pointDays: string[], legacyPo
   }));
 
   materials.forEach((material) => {
-    Array.from({ length: getRoundCount(material) }, (_, index) => index + 1).forEach((round) => {
-      material.chapters.forEach((chapter) => {
-        chapter.problems.forEach((problem) => {
-          const state = getProblemState(problem, round);
-          const awardId = `${material.id}:${round}:${chapter.id}:${problem.id}`;
-          const earnedOn = state.studiedOn ?? localDateKey();
-          if (state.studiedOn || state.status !== "todo") {
-            awards.push({ key: `start:${awardId}`, points: 1, label: `新しい${getStudyUnit(material)}に着手`, earnedOn });
-          }
-          if (isSolvedStatus(state.status)) {
-            awards.push({ key: `solve:${awardId}`, points: 2, label: getStudyMode(material) === "reading" ? `${getStudyUnit(material)}を読了` : "問題を解決", earnedOn });
+    getEnabledModes(material).forEach((mode) => {
+      Array.from({ length: getRoundCount(material, mode) }, (_, index) => index + 1).forEach((round) => {
+        material.chapters.forEach((chapter) => {
+          getChapterItems(chapter, mode).forEach((problem) => {
+            const state = getProblemState(problem, round);
+            const awardId = trackAwardId(material, mode, round, chapter.id, problem.id);
+            const earnedOn = state.studiedOn ?? localDateKey();
+            if (state.studiedOn || state.status !== "todo") {
+              awards.push({ key: `start:${awardId}`, points: 1, label: `新しい${getStudyUnit(material, mode)}に着手`, earnedOn });
+            }
+            if (isSolvedStatus(state.status)) {
+              awards.push({ key: `solve:${awardId}`, points: 2, label: mode === "reading" ? `${getStudyUnit(material, mode)}を読了` : "問題を解決", earnedOn });
+            }
+          });
+          if (getChapterItems(chapter, mode).length > 0 && pct([chapter], round, mode) === 100) {
+            awards.push({ key: `chapter:${trackAwardId(material, mode, round, chapter.id)}`, points: 15, label: `${chapter.title}の${getTrackLabel(mode)}を完了`, earnedOn: localDateKey() });
           }
         });
-        if (pct([chapter], round) === 100) {
-          awards.push({ key: `chapter:${material.id}:${round}:${chapter.id}`, points: 15, label: `${chapter.title}を完了`, earnedOn: localDateKey() });
+        if (pct(material.chapters, round, mode) === 100) {
+          awards.push({ key: `complete:${trackRoundAwardId(material, mode, round)}`, points: 50, label: `${material.title}の${getTrackLabel(mode)} 第${round}周を完了`, earnedOn: localDateKey() });
         }
       });
-      if (pct(material.chapters, round) === 100) {
-        awards.push({ key: `complete:${material.id}:${round}`, points: 50, label: `${material.title} 第${round}周を完了`, earnedOn: localDateKey() });
-      }
     });
   });
 
@@ -587,10 +678,12 @@ export default function Home() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
   const [newKind, setNewKind] = useState<Material["kind"]>("教科書");
-  const [newStudyMode, setNewStudyMode] = useState<StudyMode>("exercise");
-  const [newUnit, setNewUnit] = useState<StudyUnit>("問");
+  const [newExerciseEnabled, setNewExerciseEnabled] = useState(true);
+  const [newReadingEnabled, setNewReadingEnabled] = useState(false);
+  const [newExerciseUnit, setNewExerciseUnit] = useState<StudyUnit>("問");
+  const [newReadingUnit, setNewReadingUnit] = useState<StudyUnit>("節");
   const [chapterDrafts, setChapterDrafts] = useState<ChapterDraft[]>([
-    { title: "第1章", count: 10 },
+    { title: "第1章", exerciseCount: 10, readingCount: 0 },
   ]);
   const [activity, setActivity] = useState<Record<string, number>>({});
   const [goals, setGoals] = useState<Goals>({ weekly: 20, monthly: 80 });
@@ -614,7 +707,7 @@ export default function Home() {
   const skipNextCloudPush = useRef(false);
   const lastSyncedAtRef = useRef("");
   const latestSnapshotRef = useRef<StudySnapshot>({
-    version: 9,
+    version: 10,
     exportedAt: new Date().toISOString(),
     materials: seed,
     activity: {},
@@ -641,7 +734,7 @@ export default function Home() {
 
   useEffect(() => {
     latestSnapshotRef.current = {
-      version: 9,
+      version: 10,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -887,12 +980,13 @@ export default function Home() {
   const activeMaterials = materials.filter((material) => !material.archived);
   const archivedMaterials = materials.filter((material) => material.archived);
   const current = materials.find((m) => m.id === selected) ?? activeMaterials[0] ?? materials[0];
-  const currentRound = current ? getActiveRound(current) : 1;
+  const currentMode = current ? getStudyMode(current) : "exercise";
+  const currentRound = current ? getActiveRound(current, currentMode) : 1;
   const now = new Date(clock);
   const todayKey = localDateKey(now);
   const reviewEntries: ReviewEntry[] = activeMaterials.flatMap((material) =>
-    Array.from({ length: getRoundCount(material) }, (_, index) => index + 1).flatMap((round) =>
-      material.chapters.flatMap((chapter) => chapter.problems.flatMap((problem) => {
+    !isTrackEnabled(material, "exercise") ? [] : Array.from({ length: getRoundCount(material, "exercise") }, (_, index) => index + 1).flatMap((round) =>
+      material.chapters.flatMap((chapter) => getChapterItems(chapter, "exercise").flatMap((problem) => {
         const state = getProblemState(problem, round);
         if (!isSolvedStatus(state.status) || !state.reviewDueAt) return [];
         return [{
@@ -902,6 +996,7 @@ export default function Home() {
           round,
           state,
           dueTime: state.reviewDueAt ? new Date(state.reviewDueAt).getTime() : 0,
+          mode: "exercise" as const,
         }];
       })),
     ),
@@ -910,18 +1005,23 @@ export default function Home() {
   const upcomingReviews = reviewEntries.filter((entry) => entry.dueTime > clock);
   const review = dueReviews.length;
   const totalProblems = activeMaterials.flatMap((material) => {
-    const round = getActiveRound(material);
-    return material.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, round)));
+    return getEnabledModes(material).flatMap((mode) => {
+      const round = getActiveRound(material, mode);
+      return material.chapters.flatMap((chapter) => getChapterItems(chapter, mode).map((problem) => getProblemState(problem, round)));
+    });
   });
   const allRoundProblems = activeMaterials.flatMap((material) =>
-    Array.from({ length: getRoundCount(material) }, (_, index) =>
-      material.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, index + 1))),
-    ).flat(),
+    getEnabledModes(material).flatMap((mode) =>
+      Array.from({ length: getRoundCount(material, mode) }, (_, index) =>
+        material.chapters.flatMap((chapter) => getChapterItems(chapter, mode).map((problem) => getProblemState(problem, index + 1))),
+      ).flat(),
+    ),
   );
   const solved = allRoundProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
-  const currentSolved = totalProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
-  const overall = totalProblems.length ? Math.round((currentSolved / totalProblems.length) * 100) : 0;
+  const overall = activeMaterials.length
+    ? Math.round(activeMaterials.reduce((sum, material) => sum + materialPct(material), 0) / activeMaterials.length)
+    : 0;
   const heatToday = new Date(`${todayKey}T12:00:00`);
   const heatDays = Array.from({ length: 49 }, (_, index) => {
     const date = new Date(heatToday);
@@ -960,7 +1060,9 @@ export default function Home() {
   const milestoneSteps = [10, 25, 50, 100, 250, 500];
   const unlockedMilestones = milestoneSteps.filter((step) => solved >= step);
   const completedRounds = activeMaterials.flatMap((material) =>
-    Array.from({ length: getRoundCount(material) }, (_, index) => pct(material.chapters, index + 1) === 100),
+    getEnabledModes(material).flatMap((mode) =>
+      Array.from({ length: getRoundCount(material, mode) }, (_, index) => pct(material.chapters, index + 1, mode) === 100),
+    ),
   ).filter(Boolean).length;
   const nextMilestone = milestoneSteps.find((step) => solved < step);
   const enabledExams = exams.filter((exam) => exam.enabled);
@@ -973,12 +1075,12 @@ export default function Home() {
   const nextExamDays = nextExam?.date ? Math.ceil((new Date(`${nextExam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
   const dateLabel = new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long", day: "numeric", weekday: "long" }).format(now);
 
-  const visibleFilter: ProblemFilter = current && filter !== "all" && filter !== "review-due" && !getStatusOrder(current).includes(filter)
+  const visibleFilter: ProblemFilter = current && filter !== "all" && filter !== "review-due" && !getStatusOrder(current, currentMode).includes(filter)
     ? "all"
-    : filter;
+    : currentMode === "reading" && filter === "review-due" ? "all" : filter;
   const filteredChapters = current?.chapters.map((chapter) => ({
     ...chapter,
-    problems: chapter.problems
+    problems: getChapterItems(chapter, currentMode)
       .map((problem) => ({ ...problem, ...getProblemState(problem, currentRound) }))
       .filter((problem) => visibleFilter === "all"
         || problem.status === visibleFilter
@@ -1078,7 +1180,7 @@ export default function Home() {
   };
 
   const recordReview = (entry: ReviewEntry) => {
-    const problemKey = `${entry.material.id}:${entry.round}:${entry.chapter.id}:${entry.problem.id}`;
+    const problemKey = trackAwardId(entry.material, "exercise", entry.round, entry.chapter.id, entry.problem.id);
     const reviewCount = entry.state.reviewCount ?? 0;
     const reviewEvent: StudyEvent = {
       id: `review:${todayKey}:${problemKey}:${reviewCount}`,
@@ -1112,47 +1214,46 @@ export default function Home() {
   };
 
   const cycleProblem = (chapterId: string, problemId: number) => {
-    const targetProblem = current.chapters
-      .find((chapter) => chapter.id === chapterId)
-      ?.problems.find((problem) => problem.id === problemId);
-    if (!targetProblem) return;
+    const targetChapter = current.chapters.find((chapter) => chapter.id === chapterId);
+    const targetProblem = targetChapter && getChapterItems(targetChapter, currentMode).find((problem) => problem.id === problemId);
+    if (!targetProblem || !targetChapter) return;
     const targetState = getProblemState(targetProblem, currentRound);
     const shouldRecord = !targetState.studiedOn;
-    const materialStatusOrder = getStatusOrder(current);
+    const materialStatusOrder = getStatusOrder(current, currentMode);
     const currentStatusIndex = materialStatusOrder.indexOf(targetState.status);
     const nextStatus = materialStatusOrder[(Math.max(-1, currentStatusIndex) + 1) % materialStatusOrder.length];
     const today = todayKey;
-    const awardId = `${current.id}:${currentRound}:${chapterId}:${problemId}`;
+    const awardId = trackAwardId(current, currentMode, currentRound, chapterId, problemId);
     const awards: PointAward[] = firstStudyAwards(today);
     const events: StudyEvent[] = [{ id: `study:${today}:${awardId}`, type: "study", date: today, problemKey: awardId }];
     if (shouldRecord) {
-      awards.push({ key: `start:${awardId}`, points: 1, label: `新しい${getStudyUnit(current)}に着手`, earnedOn: today });
+      awards.push({ key: `start:${awardId}`, points: 1, label: `新しい${getStudyUnit(current, currentMode)}に着手`, earnedOn: today });
     }
     if (nextStatus === "solved") {
-      awards.push({ key: `solve:${awardId}`, points: 2, label: getStudyMode(current) === "reading" ? `${getStudyUnit(current)}を読了` : "問題を解決", earnedOn: today });
+      awards.push({ key: `solve:${awardId}`, points: 2, label: currentMode === "reading" ? `${getStudyUnit(current, currentMode)}を読了` : "問題を解決", earnedOn: today });
       events.push({ id: `solve:${today}:${awardId}`, type: "solve", date: today, problemKey: awardId });
     }
-    const targetChapter = current.chapters.find((chapter) => chapter.id === chapterId)!;
-    const willCompleteChapter = isSolvedStatus(nextStatus) && targetChapter.problems.every((problem) =>
+    const targetChapterItems = getChapterItems(targetChapter, currentMode);
+    const willCompleteChapter = isSolvedStatus(nextStatus) && targetChapterItems.every((problem) =>
       problem.id === problemId || isSolvedStatus(getProblemState(problem, currentRound).status),
     );
     if (willCompleteChapter) {
-      awards.push({ key: `chapter:${current.id}:${currentRound}:${chapterId}`, points: 15, label: `${targetChapter.title}を完了`, earnedOn: today });
+      awards.push({ key: `chapter:${trackAwardId(current, currentMode, currentRound, chapterId)}`, points: 15, label: `${targetChapter.title}の${getTrackLabel(currentMode)}を完了`, earnedOn: today });
     }
     const willCompleteRound = isSolvedStatus(nextStatus) && current.chapters.every((chapter) =>
-      chapter.problems.every((problem) => {
+      getChapterItems(chapter, currentMode).every((problem) => {
         if (chapter.id === chapterId && problem.id === problemId) return true;
         return isSolvedStatus(getProblemState(problem, currentRound).status);
       }),
     );
     if (willCompleteRound) {
-      awards.push({ key: `complete:${current.id}:${currentRound}`, points: 50, label: `${current.title} 第${currentRound}周を完了`, earnedOn: today });
+      awards.push({ key: `complete:${trackRoundAwardId(current, currentMode, currentRound)}`, points: 50, label: `${current.title}の${getTrackLabel(currentMode)} 第${currentRound}周を完了`, earnedOn: today });
     }
     const firstSolve = nextStatus === "solved" && !pointAwards.some((award) => award.key === `solve:${awardId}`);
     grantPointAwards(awards, events);
     if (firstSolve) advanceTimedReward();
     let nextState: ProblemState = { ...targetState, studiedOn: targetState.studiedOn ?? today, status: nextStatus };
-    if (nextStatus === "solved") {
+    if (nextStatus === "solved" && currentMode === "exercise") {
       nextState = { ...nextState, reviewCount: 0, reviewDueAt: new Date(clock + reviewIntervals[0] * 86400000).toISOString(), lastReviewedAt: undefined };
     } else if (nextStatus === "todo") {
       nextState = { ...nextState, reviewCount: undefined, reviewDueAt: undefined, lastReviewedAt: undefined };
@@ -1163,23 +1264,18 @@ export default function Home() {
           ? material
           : {
               ...material,
-              chapters: material.chapters.map((chapter) =>
-                chapter.id !== chapterId
-                  ? chapter
-                  : {
-                      ...chapter,
-                      problems: chapter.problems.map((problem) => problem.id !== problemId
-                        ? problem
-                        : withProblemState(problem, currentRound, nextState)),
-                    },
-              ),
+              chapters: material.chapters.map((chapter) => chapter.id !== chapterId
+                ? chapter
+                : withChapterItems(chapter, currentMode, getChapterItems(chapter, currentMode).map((problem) => problem.id !== problemId
+                  ? problem
+                  : withProblemState(problem, currentRound, nextState)))),
             },
       ),
     );
   };
 
   const resetProblem = (chapterId: string, problemId: number) => {
-    const problemKey = `${current.id}:${currentRound}:${chapterId}:${problemId}`;
+    const problemKey = trackAwardId(current, currentMode, currentRound, chapterId, problemId);
     const removedEvents = studyEvents.filter((event) => event.problemKey === problemKey);
     const removedActivity = removedEvents.filter((event) => event.type === "study" || event.type === "review");
     setMaterials((items) =>
@@ -1188,12 +1284,9 @@ export default function Home() {
           ? material
           : {
               ...material,
-              chapters: material.chapters.map((chapter) =>
-                chapter.id !== chapterId
-                  ? chapter
-                  : {
-                      ...chapter,
-                      problems: chapter.problems.map((problem) => {
+              chapters: material.chapters.map((chapter) => chapter.id !== chapterId
+                ? chapter
+                : withChapterItems(chapter, currentMode, getChapterItems(chapter, currentMode).map((problem) => {
                         if (problem.id !== problemId) return problem;
                         if (currentRound === 1) {
                           return {
@@ -1207,9 +1300,7 @@ export default function Home() {
                         }
                         const rounds = { ...problem.rounds, [String(currentRound)]: { status: "todo" as Status } };
                         return { ...problem, rounds };
-                      }),
-                    },
-              ),
+                      }))),
             },
       ),
     );
@@ -1229,15 +1320,28 @@ export default function Home() {
     }
   };
 
-  const setMaterialRound = (materialId: string, round: number) => {
-    setMaterials((items) => items.map((material) => material.id === materialId ? { ...material, activeRound: round } : material));
+  const setMaterialRound = (materialId: string, round: number, mode?: StudyMode) => {
+    setMaterials((items) => items.map((material) => {
+      if (material.id !== materialId) return material;
+      const targetMode = mode ?? getStudyMode(material);
+      return targetMode === "reading" ? { ...material, readingActiveRound: round } : { ...material, exerciseActiveRound: round };
+    }));
+    setFilter("all");
+  };
+
+  const setMaterialTrack = (materialId: string, mode: StudyMode) => {
+    setMaterials((items) => items.map((material) => material.id === materialId && isTrackEnabled(material, mode) ? { ...material, activeTrack: mode } : material));
     setFilter("all");
   };
 
   const startNextRound = () => {
-    const nextRound = getRoundCount(current) + 1;
-    if (!window.confirm(`${current.title}の第${nextRound}周を開始しますか？\nこれまでの記録は残したまま、新しい状態で取り組めます。`)) return;
-    setMaterials((items) => items.map((material) => material.id === current.id ? { ...material, roundCount: nextRound, activeRound: nextRound } : material));
+    const nextRound = getRoundCount(current, currentMode) + 1;
+    if (!window.confirm(`${current.title}の「${getTrackLabel(currentMode)}」第${nextRound}周を開始しますか？\nこれまでの記録は残したまま、新しい状態で取り組めます。`)) return;
+    setMaterials((items) => items.map((material) => material.id !== current.id
+      ? material
+      : currentMode === "reading"
+        ? { ...material, readingRoundCount: nextRound, readingActiveRound: nextRound }
+        : { ...material, exerciseRoundCount: nextRound, exerciseActiveRound: nextRound }));
     setFilter("all");
   };
 
@@ -1245,9 +1349,11 @@ export default function Home() {
     setEditingId(null);
     setNewTitle("");
     setNewKind("教科書");
-    setNewStudyMode("exercise");
-    setNewUnit("問");
-    setChapterDrafts([{ title: "第1章", count: 10 }]);
+    setNewExerciseEnabled(true);
+    setNewReadingEnabled(false);
+    setNewExerciseUnit("問");
+    setNewReadingUnit("節");
+    setChapterDrafts([{ title: "第1章", exerciseCount: 10, readingCount: 0 }]);
     setAdding(true);
   };
 
@@ -1255,52 +1361,73 @@ export default function Home() {
     setEditingId(material.id);
     setNewTitle(material.title);
     setNewKind(material.kind);
-    setNewStudyMode(getStudyMode(material));
-    setNewUnit(getStudyUnit(material));
+    setNewExerciseEnabled(isTrackEnabled(material, "exercise"));
+    setNewReadingEnabled(isTrackEnabled(material, "reading"));
+    setNewExerciseUnit(getStudyUnit(material, "exercise"));
+    setNewReadingUnit(getStudyUnit(material, "reading"));
     setChapterDrafts(
       material.chapters.map((chapter) => ({
+        id: chapter.id,
         title: chapter.title,
-        count: chapter.problems.length,
+        exerciseCount: getChapterItems(chapter, "exercise").length,
+        readingCount: getChapterItems(chapter, "reading").length,
       })),
     );
     setAdding(true);
   };
 
   const saveMaterial = () => {
-    if (!newTitle.trim() || chapterDrafts.length === 0) return;
+    const exerciseTotal = chapterDrafts.reduce((sum, chapter) => sum + chapter.exerciseCount, 0);
+    const readingTotal = chapterDrafts.reduce((sum, chapter) => sum + chapter.readingCount, 0);
+    if (!newTitle.trim() || chapterDrafts.length === 0 || (!newExerciseEnabled && !newReadingEnabled)) return;
+    if ((newExerciseEnabled && exerciseTotal === 0) || (newReadingEnabled && readingTotal === 0)) return;
     const normalized = chapterDrafts.map((chapter, index) => ({
+      id: chapter.id,
       title: chapter.title.trim() || `第${index + 1}章`,
-      count: Math.max(1, Math.min(500, Number(chapter.count) || 1)),
+      exerciseCount: Math.max(0, Math.min(500, Number(chapter.exerciseCount) || 0)),
+      readingCount: Math.max(0, Math.min(500, Number(chapter.readingCount) || 0)),
     }));
+    const stamp = Date.now();
+    const resizeItems = (previous: Problem[] | undefined, count: number, mode: StudyMode) => Array.from({ length: count }, (_, itemIndex) => (
+      previous?.[itemIndex] ? normalizeProblem(previous[itemIndex], mode) : { id: itemIndex + 1, status: "todo" as Status }
+    ));
 
     if (editingId) {
       setMaterials((items) =>
         items.map((material) => {
           if (material.id !== editingId) return material;
+          const primaryMode = getPrimaryMode(material);
+          const activeTrack = isTrackEnabled({ ...material, exerciseEnabled: newExerciseEnabled, readingEnabled: newReadingEnabled }, getStudyMode(material))
+            ? getStudyMode(material)
+            : newExerciseEnabled
+              ? "exercise"
+              : "reading";
           return {
             ...material,
             title: newTitle.trim(),
             kind: newKind,
-            studyMode: newStudyMode,
-            unit: newUnit,
+            studyMode: primaryMode,
+            unit: primaryMode === "reading" ? newReadingUnit : newExerciseUnit,
+            activeTrack,
+            exerciseEnabled: newExerciseEnabled,
+            readingEnabled: newReadingEnabled,
+            exerciseUnit: newExerciseUnit,
+            readingUnit: newReadingUnit,
             chapters: normalized.map((draft, index) => {
-              const previous = material.chapters[index];
+              const previous = draft.id ? material.chapters.find((chapter) => chapter.id === draft.id) : undefined;
               return {
-                id: previous?.id ?? `${material.id}-${Date.now()}-${index}`,
+                id: draft.id ?? `${material.id}-${stamp}-${index}`,
                 title: draft.title,
-                problems: Array.from({ length: draft.count }, (_, problemIndex) => (
-                  previous?.problems[problemIndex] ? normalizeProblem(previous.problems[problemIndex], newStudyMode) : {
-                    id: problemIndex + 1,
-                    status: "todo" as Status,
-                  }
-                )),
+                problems: resizeItems(previous ? getChapterItems(previous, "exercise") : undefined, draft.exerciseCount, "exercise"),
+                readingItems: resizeItems(previous ? getChapterItems(previous, "reading") : undefined, draft.readingCount, "reading"),
               };
             }),
           };
         }),
       );
     } else {
-      const id = `material-${Date.now()}`;
+      const id = `material-${stamp}`;
+      const primaryMode: StudyMode = newExerciseEnabled ? "exercise" : "reading";
       setMaterials((items) => [
         ...items,
         {
@@ -1308,15 +1435,18 @@ export default function Home() {
           title: newTitle.trim(),
           kind: newKind,
           color: "#6e7fbb",
-          studyMode: newStudyMode,
-          unit: newUnit,
+          studyMode: primaryMode,
+          unit: primaryMode === "reading" ? newReadingUnit : newExerciseUnit,
+          activeTrack: primaryMode,
+          exerciseEnabled: newExerciseEnabled,
+          readingEnabled: newReadingEnabled,
+          exerciseUnit: newExerciseUnit,
+          readingUnit: newReadingUnit,
           chapters: normalized.map((draft, index) => ({
             id: `${id}-${index + 1}`,
             title: draft.title,
-            problems: Array.from({ length: draft.count }, (_, problemIndex) => ({
-              id: problemIndex + 1,
-              status: "todo" as Status,
-            })),
+            problems: resizeItems(undefined, draft.exerciseCount, "exercise"),
+            readingItems: resizeItems(undefined, draft.readingCount, "reading"),
           })),
         },
       ]);
@@ -1346,8 +1476,10 @@ export default function Home() {
   };
 
   const addExam = () => {
-    const id = `exam-${Date.now()}`;
-    setExams((items) => [...items, { id, enabled: true, name: "", date: "", materialId: activeMaterials[0]?.id ?? "", round: activeMaterials[0] ? getActiveRound(activeMaterials[0]) : 1 }]);
+    const id = `exam-${clock}-${exams.length}`;
+    const material = activeMaterials[0];
+    const mode = material && isTrackEnabled(material, "exercise") ? "exercise" : "reading";
+    setExams((items) => [...items, { id, enabled: true, name: "", date: "", materialId: material?.id ?? "", round: material ? getActiveRound(material, mode) : 1 }]);
   };
 
   const updateExam = (id: string, changes: Partial<ExamSettings>) => {
@@ -1457,7 +1589,7 @@ export default function Home() {
 
   const exportData = () => {
     const backup = {
-      version: 9,
+      version: 10,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -1549,7 +1681,7 @@ export default function Home() {
             >
               <i style={{ background: material.color }} />
               <span>{material.title}</span>
-              <small>{pct(material.chapters, getActiveRound(material))}%</small>
+              <small>{materialPct(material)}%</small>
             </button>
           ))}
           <button className="add-link" onClick={openAdd}>＋ 教材を追加</button>
@@ -1590,15 +1722,24 @@ export default function Home() {
             </div>
             <div className="material-cards">
               {activeMaterials.map((material) => {
-                const count = material.chapters.reduce((sum, chapter) => sum + chapter.problems.length, 0);
+                const modes = getEnabledModes(material);
                 const sourceIndex = materials.findIndex((item) => item.id === material.id);
                 return (
                   <article className="material-card" key={material.id}>
                     <button className="material-open" onClick={() => { setSelected(material.id); setView("home"); }}>
                       <span className="book-chip" style={{ background: material.color }}>{material.kind === "授業" ? "授" : "本"}</span>
-                      <div><small>{material.kind}・{getStudyMode(material) === "reading" ? "読書" : "演習"}</small><h3>{material.title}</h3><p>{material.chapters.length}章・全{count}{getStudyUnit(material)}</p></div>
+                      <div>
+                        <small>{material.kind}・{modes.map(getTrackLabel).join("・")}</small>
+                        <h3>{material.title}</h3>
+                        <p>{material.chapters.length}章・{modes.map((mode) => `${material.chapters.reduce((sum, chapter) => sum + getChapterItems(chapter, mode).length, 0)}${getStudyUnit(material, mode)}`).join("／")}</p>
+                      </div>
                     </button>
-                    <div className="material-card-progress"><strong>第{getActiveRound(material)}周・{pct(material.chapters, getActiveRound(material))}%</strong><div><i style={{ width: `${pct(material.chapters, getActiveRound(material))}%`, background: material.color }} /></div></div>
+                    <div className="material-card-progress track-progress-list">
+                      {modes.map((mode) => {
+                        const progress = pct(material.chapters, getActiveRound(material, mode), mode);
+                        return <div className="track-progress-row" key={mode}><strong>{getTrackLabel(mode)} 第{getActiveRound(material, mode)}周・{progress}%</strong><div><i style={{ width: `${progress}%`, background: material.color }} /></div></div>;
+                      })}
+                    </div>
                     <div className="material-actions">
                       <button className="secondary-button" onClick={() => moveMaterial(material.id, -1)} disabled={sourceIndex === 0} aria-label={`${material.title}を上へ移動`}>↑</button>
                       <button className="secondary-button" onClick={() => moveMaterial(material.id, 1)} disabled={sourceIndex === materials.length - 1} aria-label={`${material.title}を下へ移動`}>↓</button>
@@ -1636,12 +1777,12 @@ export default function Home() {
                     <span className="review-number">{entry.problem.id}</span>
                     <div>
                       <small>{entry.material.title}・第{entry.round}周</small>
-                      <h3>{entry.chapter.title}・{getStudyUnit(entry.material)} {entry.problem.id}</h3>
+                      <h3>{entry.chapter.title}・{getStudyUnit(entry.material, "exercise")} {entry.problem.id}</h3>
                       <p className={due ? "review-time due" : "review-time"}>{due ? "復習可能" : `予定まで ${formatRemaining(entry.dueTime - clock)}`}</p>
                     </div>
                     {due
                       ? <button className="secondary-button" onClick={() => recordReview(entry)}>復習を記録</button>
-                      : <button className="secondary-button" onClick={() => { setMaterialRound(entry.material.id, entry.round); setSelected(entry.material.id); setView("home"); }}>対象を開く</button>}
+                      : <button className="secondary-button" onClick={() => { setMaterialTrack(entry.material.id, "exercise"); setMaterialRound(entry.material.id, entry.round, "exercise"); setSelected(entry.material.id); setView("home"); }}>対象を開く</button>}
                   </article>
                 );
               })}
@@ -1732,8 +1873,9 @@ export default function Home() {
             <div className="exam-list">
               {exams.map((exam) => {
                 const material = activeMaterials.find((item) => item.id === exam.materialId) ?? activeMaterials[0];
-                const round = material ? Math.min(getRoundCount(material), Math.max(1, exam.round ?? getActiveRound(material))) : 1;
-                const problems = material?.chapters.flatMap((chapter) => chapter.problems.map((problem) => getProblemState(problem, round))) ?? [];
+                const examMode: StudyMode = material && isTrackEnabled(material, "exercise") ? "exercise" : "reading";
+                const round = material ? Math.min(getRoundCount(material, examMode), Math.max(1, exam.round ?? getActiveRound(material, examMode))) : 1;
+                const problems = material?.chapters.flatMap((chapter) => getChapterItems(chapter, examMode).map((problem) => getProblemState(problem, round))) ?? [];
                 const solvedCount = problems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
                 const reviewCount = problems.filter((problem) => Boolean(problem.reviewDueAt) && new Date(problem.reviewDueAt!).getTime() <= clock).length;
                 const days = exam.date ? Math.ceil((new Date(`${exam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
@@ -1743,17 +1885,17 @@ export default function Home() {
                       <label className="switch-row"><span><strong>{exam.name.trim() || "新しい試験"}</strong><small>ホームの直近試験に表示</small></span><input type="checkbox" checked={exam.enabled} onChange={(event) => updateExam(exam.id, { enabled: event.target.checked })} /></label>
                       <label>試験名<input value={exam.name} onChange={(event) => updateExam(exam.id, { name: event.target.value })} placeholder="例：線形代数学 中間試験" /></label>
                       <label>試験日<input type="date" value={exam.date} onChange={(event) => updateExam(exam.id, { date: event.target.value })} /></label>
-                      <label>対象教材<select value={exam.materialId} onChange={(event) => { const materialId = event.target.value; const selectedMaterial = activeMaterials.find((item) => item.id === materialId); updateExam(exam.id, { materialId, round: selectedMaterial ? getActiveRound(selectedMaterial) : 1 }); }}>{activeMaterials.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>
-                      {material && <label>対象の周<select value={round} onChange={(event) => updateExam(exam.id, { round: Number(event.target.value) })}>{Array.from({ length: getRoundCount(material) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select></label>}
+                      <label>対象教材<select value={exam.materialId} onChange={(event) => { const materialId = event.target.value; const selectedMaterial = activeMaterials.find((item) => item.id === materialId); const selectedMode: StudyMode = selectedMaterial && isTrackEnabled(selectedMaterial, "exercise") ? "exercise" : "reading"; updateExam(exam.id, { materialId, round: selectedMaterial ? getActiveRound(selectedMaterial, selectedMode) : 1 }); }}>{activeMaterials.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>
+                      {material && <label>対象の周<select value={round} onChange={(event) => updateExam(exam.id, { round: Number(event.target.value) })}>{Array.from({ length: getRoundCount(material, examMode) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select></label>}
                       <button className="danger-button" onClick={() => deleteExam(exam.id)}>試験を削除</button>
                     </div>
                     <div className="exam-summary">
                       <p>{exam.name.trim() || "試験名を設定してください"}</p>
                       <strong>{days === null ? "—" : days >= 0 ? `あと${days}日` : `${Math.abs(days)}日前`}</strong>
-                      <span>{material ? `${material.title}・第${round}周` : "対象教材なし"}</span>
+                      <span>{material ? `${material.title}・${getTrackLabel(examMode)}・第${round}周` : "対象教材なし"}</span>
                       <div className="exam-stats"><div><b>{solvedCount}</b><small>完了済み</small></div><div><b>{Math.max(0, problems.length - solvedCount)}</b><small>未完了</small></div><div><b>{reviewCount}</b><small>復習可能</small></div></div>
                       <div className="goal-track"><i style={{ width: `${problems.length ? Math.round((solvedCount / problems.length) * 100) : 0}%` }} /></div>
-                      {material && <button className="primary-button" onClick={() => { setSelected(material.id); setView("home"); }}>対象教材を開く</button>}
+                      {material && <button className="primary-button" onClick={() => { setMaterialTrack(material.id, examMode); setMaterialRound(material.id, round, examMode); setSelected(material.id); setView("home"); }}>対象教材を開く</button>}
                     </div>
                   </article>
                 );
@@ -1841,15 +1983,21 @@ export default function Home() {
         <section className="material-head">
           <div className="book-title">
             <span style={{ background: current.color }}>{current.kind === "授業" ? "授" : "本"}</span>
-            <div><p>{current.kind}・{getStudyMode(current) === "reading" ? "読書" : "演習"}・単位：{getStudyUnit(current)}</p><h2>{current.title}</h2></div>
+            <div>
+              <p>{current.kind}・{getEnabledModes(current).map(getTrackLabel).join("・")}</p>
+              <h2>{current.title}</h2>
+              {getEnabledModes(current).length > 1 && <div className="track-switch" aria-label="表示する学習内容">
+                {getEnabledModes(current).map((mode) => <button className={currentMode === mode ? "active" : ""} key={mode} onClick={() => setMaterialTrack(current.id, mode)}>{getTrackLabel(mode)}</button>)}
+              </div>}
+            </div>
           </div>
           <div className="material-progress">
-            <div><span>第{currentRound}周の進捗</span><strong>{pct(current.chapters, currentRound)}%</strong></div>
-            <div className="progress-track"><i style={{ width: `${pct(current.chapters, currentRound)}%`, background: current.color }} /></div>
+            <div><span>{getTrackLabel(currentMode)}・第{currentRound}周</span><strong>{pct(current.chapters, currentRound, currentMode)}%</strong></div>
+            <div className="progress-track"><i style={{ width: `${pct(current.chapters, currentRound, currentMode)}%`, background: current.color }} /></div>
           </div>
           <div className="material-head-actions">
-            <select aria-label="表示する周回" value={currentRound} onChange={(event) => setMaterialRound(current.id, Number(event.target.value))}>{Array.from({ length: getRoundCount(current) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select>
-            <button className="secondary-button" onClick={startNextRound}>＋ 次の周を開始</button>
+            <select aria-label="表示する周回" value={currentRound} onChange={(event) => setMaterialRound(current.id, Number(event.target.value), currentMode)}>{Array.from({ length: getRoundCount(current, currentMode) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select>
+            <button className="secondary-button" onClick={startNextRound}>＋ {getTrackLabel(currentMode)}の次周</button>
             <button className="secondary-button edit-material" onClick={() => openEdit(current)}>構成を設定</button>
           </div>
         </section>
@@ -1857,29 +2005,30 @@ export default function Home() {
         <section className="problem-section">
           <div className="problem-toolbar">
             <div>
-              <h3>章ごとの{getStudyMode(current) === "reading" ? "読書" : "演習"}</h3>
-              <p>{getStudyUnit(current)}番号を押すと進捗が切り替わります。完了状況と復習予定は別々に記録されます。</p>
+              <h3>章ごとの{getTrackLabel(currentMode)}</h3>
+              <p>{getStudyUnit(current, currentMode)}番号を押すと進捗が切り替わります。{currentMode === "exercise" ? "解決状況と復習予定は別々に記録されます。" : "読書の進み具合を記録できます。"}</p>
             </div>
             <select aria-label="状態で絞り込む" value={visibleFilter} onChange={(e) => setFilter(e.target.value as ProblemFilter)}>
               <option value="all">すべての状態</option>
-              {getStatusOrder(current).map((status) => <option value={status} key={status}>{getStatusLabel(current, status)}</option>)}
-              <option value="review-due">復習可能</option>
+              {getStatusOrder(current, currentMode).map((status) => <option value={status} key={status}>{getStatusLabel(current, status, currentMode)}</option>)}
+              {currentMode === "exercise" && <option value="review-due">復習可能</option>}
             </select>
           </div>
           <div className="legend">
-            {getStatusOrder(current).map((status) => <span key={status}><i className={`dot ${status}`} />{getStatusLabel(current, status)}</span>)}
-            <span><i className="dot review" />復習予定（進捗と併記）</span>
+            {getStatusOrder(current, currentMode).map((status) => <span key={status}><i className={`dot ${status}`} />{getStatusLabel(current, status, currentMode)}</span>)}
+            {currentMode === "exercise" && <span><i className="dot review" />復習予定（進捗と併記）</span>}
           </div>
 
           <div className="chapters">
             {filteredChapters.map((chapter) => {
               const original = current.chapters.find((c) => c.id === chapter.id)!;
-              const chapterPercent = pct([original], currentRound);
+              const originalItems = getChapterItems(original, currentMode);
+              const chapterPercent = pct([original], currentRound, currentMode);
               return (
                 <article className={`chapter-card ${chapterPercent === 100 ? "completed" : ""}`} key={chapter.id}>
                   <div className="chapter-row">
                     <div className="chapter-info">
-                      <h4>{chapter.title}{chapterPercent === 100 && <span className="chapter-complete-label">完了</span>}</h4><p>{original.problems.length}{getStudyUnit(current)}中 {original.problems.filter((problem) => { const state = getProblemState(problem, currentRound); return state.status === "solved" || state.status === "with-answer"; }).length}{getStudyUnit(current)} {getCompletionLabel(current)}</p>
+                      <h4>{chapter.title}{originalItems.length > 0 && chapterPercent === 100 && <span className="chapter-complete-label">完了</span>}</h4><p>{originalItems.length}{getStudyUnit(current, currentMode)}中 {originalItems.filter((problem) => { const state = getProblemState(problem, currentRound); return state.status === "solved" || state.status === "with-answer"; }).length}{getStudyUnit(current, currentMode)} {getCompletionLabel(current, currentMode)}</p>
                     </div>
                     <div className="chapter-pct">
                       <span>{chapterPercent}%</span>
@@ -1888,15 +2037,15 @@ export default function Home() {
                   </div>
                   <div className="problem-grid">
                     {chapter.problems.map((problem) => {
-                      const reviewTime = problem.reviewDueAt ? new Date(problem.reviewDueAt).getTime() : null;
+                      const reviewTime = currentMode === "exercise" && problem.reviewDueAt ? new Date(problem.reviewDueAt).getTime() : null;
                       const reviewState = reviewTime === null ? null : reviewTime <= clock ? "due" : "scheduled";
                       const reviewText = reviewState === "due" ? "復習可能" : reviewState === "scheduled" ? "復習予定あり" : "";
                       return (
                         <div className={`problem-wrap ${reviewState ? `review-${reviewState}` : ""}`} key={problem.id}>
                           <button
                             className={`problem ${problem.status}`}
-                            title={`${problem.id}${getStudyUnit(current)}・${getStatusLabel(current, problem.status)}${reviewText ? `・${reviewText}` : ""}`}
-                            aria-label={`${problem.id}${getStudyUnit(current)}、${getStatusLabel(current, problem.status)}${reviewText ? `、${reviewText}` : ""}。押すと次の進捗へ`}
+                            title={`${problem.id}${getStudyUnit(current, currentMode)}・${getStatusLabel(current, problem.status, currentMode)}${reviewText ? `・${reviewText}` : ""}`}
+                            aria-label={`${problem.id}${getStudyUnit(current, currentMode)}、${getStatusLabel(current, problem.status, currentMode)}${reviewText ? `、${reviewText}` : ""}。押すと次の進捗へ`}
                             onClick={() => cycleProblem(chapter.id, problem.id)}
                           >
                             {problem.id}
@@ -1905,8 +2054,8 @@ export default function Home() {
                           {problem.status !== "todo" && (
                             <button
                               className="problem-reset"
-                              title={`${problem.id}${getStudyUnit(current)}の記録を消す`}
-                              aria-label={`${problem.id}${getStudyUnit(current)}の学習記録を消す`}
+                              title={`${problem.id}${getStudyUnit(current, currentMode)}の記録を消す`}
+                              aria-label={`${problem.id}${getStudyUnit(current, currentMode)}の学習記録を消す`}
                               onClick={() => resetProblem(chapter.id, problem.id)}
                             >×</button>
                           )}
@@ -1997,22 +2146,40 @@ export default function Home() {
             <div className="form-grid material-form-grid">
               <label>教材名<input autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="例：微分積分学 演習" /></label>
               <label>種類<select value={newKind} onChange={(e) => setNewKind(e.target.value as Material["kind"])}><option>教科書</option><option>参考書</option><option>授業</option></select></label>
-              <label>学習方法<select value={newStudyMode} onChange={(e) => { const mode = e.target.value as StudyMode; setNewStudyMode(mode); if (mode === "reading" && newUnit === "問") setNewUnit("節"); }}><option value="exercise">演習</option><option value="reading">読書</option></select></label>
-              <label>記録単位<select value={newUnit} onChange={(e) => setNewUnit(e.target.value as StudyUnit)}><option>問</option><option>節</option><option>ページ</option><option>項目</option></select></label>
             </div>
+            <fieldset className="track-settings">
+              <legend>記録する内容</legend>
+              <div className={newReadingEnabled ? "track-setting enabled" : "track-setting"}>
+                <label className="track-check"><input type="checkbox" checked={newReadingEnabled} onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setNewReadingEnabled(enabled);
+                  if (enabled && chapterDrafts.every((chapter) => chapter.readingCount === 0)) setChapterDrafts((items) => items.map((item, index) => index === 0 ? { ...item, readingCount: 1 } : item));
+                }} /><span><strong>読む</strong><small>節・ページなどの読了を記録</small></span></label>
+                <label>単位<select disabled={!newReadingEnabled} value={newReadingUnit} onChange={(event) => setNewReadingUnit(event.target.value as StudyUnit)}><option>節</option><option>ページ</option><option>項目</option></select></label>
+              </div>
+              <div className={newExerciseEnabled ? "track-setting enabled" : "track-setting"}>
+                <label className="track-check"><input type="checkbox" checked={newExerciseEnabled} onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setNewExerciseEnabled(enabled);
+                  if (enabled && chapterDrafts.every((chapter) => chapter.exerciseCount === 0)) setChapterDrafts((items) => items.map((item, index) => index === 0 ? { ...item, exerciseCount: 1 } : item));
+                }} /><span><strong>演習</strong><small>問題の解決と復習予定を記録</small></span></label>
+                <label>単位<select disabled={!newExerciseEnabled} value={newExerciseUnit} onChange={(event) => setNewExerciseUnit(event.target.value as StudyUnit)}><option>問</option><option>項目</option></select></label>
+              </div>
+            </fieldset>
             <div className="chapter-editor">
-              <div className="chapter-editor-title"><strong>章と{newStudyMode === "reading" ? "読書" : "演習"}単位数</strong><button onClick={() => setChapterDrafts((items) => [...items, { title: `第${items.length + 1}章`, count: 10 }])}>＋ 章を追加</button></div>
+              <div className="chapter-editor-title"><strong>章ごとの単位数</strong><button onClick={() => setChapterDrafts((items) => [...items, { title: `第${items.length + 1}章`, exerciseCount: newExerciseEnabled ? 10 : 0, readingCount: newReadingEnabled ? 1 : 0 }])}>＋ 章を追加</button></div>
               {chapterDrafts.map((chapter, index) => (
                 <div className="chapter-draft" key={index}>
                   <span>{index + 1}</span>
                   <input aria-label={`${index + 1}章目の名前`} value={chapter.title} onChange={(e) => setChapterDrafts((items) => items.map((item, i) => i === index ? { ...item, title: e.target.value } : item))} placeholder={`第${index + 1}章`} />
-                  <label><input aria-label={`${index + 1}章目の${newUnit}数`} type="number" min="1" max="500" value={chapter.count} onChange={(e) => setChapterDrafts((items) => items.map((item, i) => i === index ? { ...item, count: Number(e.target.value) } : item))} />{newUnit}</label>
+                  {newReadingEnabled && <label><span>読む</span><input aria-label={`${index + 1}章目の読む単位数`} type="number" min="0" max="500" value={chapter.readingCount} onChange={(e) => setChapterDrafts((items) => items.map((item, i) => i === index ? { ...item, readingCount: Number(e.target.value) } : item))} />{newReadingUnit}</label>}
+                  {newExerciseEnabled && <label><span>演習</span><input aria-label={`${index + 1}章目の演習単位数`} type="number" min="0" max="500" value={chapter.exerciseCount} onChange={(e) => setChapterDrafts((items) => items.map((item, i) => i === index ? { ...item, exerciseCount: Number(e.target.value) } : item))} />{newExerciseUnit}</label>}
                   <button aria-label={`${index + 1}章目を削除`} disabled={chapterDrafts.length === 1} onClick={() => setChapterDrafts((items) => items.filter((_, i) => i !== index))}>×</button>
                 </div>
               ))}
             </div>
-            <p className="modal-note">章・学習方法・記録単位はあとから変更できます。単位数を減らすと、末尾の記録は削除されます。</p>
-            <button className="primary-button wide" onClick={saveMaterial}>{editingId ? "変更を保存する" : "教材を作成する"}</button>
+            <p className="modal-note">「読む」と「演習」は同じ教材に設定できます。各内容には1つ以上の単位が必要です。単位数を減らすと、末尾の記録は削除されます。</p>
+            <button className="primary-button wide" disabled={!newTitle.trim() || (!newReadingEnabled && !newExerciseEnabled) || (newReadingEnabled && chapterDrafts.reduce((sum, chapter) => sum + chapter.readingCount, 0) === 0) || (newExerciseEnabled && chapterDrafts.reduce((sum, chapter) => sum + chapter.exerciseCount, 0) === 0)} onClick={saveMaterial}>{editingId ? "変更を保存する" : "教材を作成する"}</button>
           </div>
         </div>
       )}
