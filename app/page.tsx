@@ -12,6 +12,7 @@ type MaterialKind = "教科書" | "参考書" | "授業";
 type ProblemState = {
   status: Status;
   studiedOn?: string;
+  reviewScheduled?: boolean;
   reviewCount?: number;
   reviewDueAt?: string;
   lastReviewedAt?: string;
@@ -190,7 +191,7 @@ const seed: Material[] = [
         problems: linearSeedStatuses.map((status, i) => ({
           id: i + 1,
           status,
-          ...((i === 3 || i === 12) ? { reviewCount: 0, reviewDueAt: seedReviewDueAt } : {}),
+          ...((i === 3 || i === 12) ? { reviewScheduled: true, reviewCount: 0, reviewDueAt: seedReviewDueAt } : {}),
         })),
       },
       {
@@ -227,7 +228,7 @@ const seed: Material[] = [
           ...(i < 6
             ? { status: "solved" as Status }
             : i === 6
-              ? { status: "solved" as Status, reviewCount: 0, reviewDueAt: seedReviewDueAt }
+              ? { status: "solved" as Status, reviewScheduled: true, reviewCount: 0, reviewDueAt: seedReviewDueAt }
               : { status: "todo" as Status }),
         })),
       },
@@ -303,6 +304,7 @@ function getProblemState(problem: Problem, round: number): ProblemState {
     return {
       status: problem.status,
       studiedOn: problem.studiedOn,
+      reviewScheduled: problem.reviewScheduled,
       reviewCount: problem.reviewCount,
       reviewDueAt: problem.reviewDueAt,
       lastReviewedAt: problem.lastReviewedAt,
@@ -325,16 +327,22 @@ function normalizeProblemState(value: unknown, studyMode: StudyMode): ProblemSta
     || candidate.status === "with-answer";
   let status: Status = validStatus ? candidate.status as Status : legacyReview ? "solved" : "todo";
   if (studyMode === "reading" && status === "with-answer") status = "solved";
+  const reviewCount = typeof candidate.reviewCount === "number" ? candidate.reviewCount : undefined;
+  const lastReviewedAt = typeof candidate.lastReviewedAt === "string" ? candidate.lastReviewedAt : undefined;
+  const reviewScheduled = typeof candidate.reviewScheduled === "boolean"
+    ? candidate.reviewScheduled
+    : legacyReview || (reviewCount ?? 0) > 0 || Boolean(lastReviewedAt);
   return {
     status,
     studiedOn: typeof candidate.studiedOn === "string" ? candidate.studiedOn : undefined,
-    reviewCount: typeof candidate.reviewCount === "number" ? candidate.reviewCount : undefined,
-    reviewDueAt: typeof candidate.reviewDueAt === "string"
+    reviewScheduled,
+    reviewCount,
+    reviewDueAt: reviewScheduled && typeof candidate.reviewDueAt === "string"
       ? candidate.reviewDueAt
       : legacyReview
         ? "1970-01-01T00:00:00.000Z"
         : undefined,
-    lastReviewedAt: typeof candidate.lastReviewedAt === "string" ? candidate.lastReviewedAt : undefined,
+    lastReviewedAt,
   };
 }
 
@@ -707,7 +715,7 @@ export default function Home() {
   const skipNextCloudPush = useRef(false);
   const lastSyncedAtRef = useRef("");
   const latestSnapshotRef = useRef<StudySnapshot>({
-    version: 10,
+    version: 11,
     exportedAt: new Date().toISOString(),
     materials: seed,
     activity: {},
@@ -734,7 +742,7 @@ export default function Home() {
 
   useEffect(() => {
     latestSnapshotRef.current = {
-      version: 10,
+      version: 11,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -1232,6 +1240,7 @@ export default function Home() {
         ...chapter,
         problems: chapter.problems.map((problem) => problem.id !== entry.problem.id ? problem : withProblemState(problem, entry.round, {
           ...entry.state,
+          reviewScheduled: true,
           reviewCount: nextReviewCount,
           reviewDueAt: nextReviewAt,
           lastReviewedAt: new Date(clock).toISOString(),
@@ -1281,10 +1290,8 @@ export default function Home() {
     grantPointAwards(awards, events);
     if (firstSolve) advanceTimedReward();
     let nextState: ProblemState = { ...targetState, studiedOn: targetState.studiedOn ?? today, status: nextStatus };
-    if (nextStatus === "solved" && currentMode === "exercise") {
-      nextState = { ...nextState, reviewCount: 0, reviewDueAt: new Date(clock + reviewIntervals[0] * 86400000).toISOString(), lastReviewedAt: undefined };
-    } else if (nextStatus === "todo") {
-      nextState = { ...nextState, reviewCount: undefined, reviewDueAt: undefined, lastReviewedAt: undefined };
+    if (nextStatus === "todo") {
+      nextState = { ...nextState, reviewScheduled: false, reviewCount: undefined, reviewDueAt: undefined, lastReviewedAt: undefined };
     }
     setMaterials((items) =>
       items.map((material) =>
@@ -1300,6 +1307,35 @@ export default function Home() {
             },
       ),
     );
+  };
+
+  const toggleProblemReview = (chapterId: string, problemId: number) => {
+    if (currentMode !== "exercise") return;
+    const targetChapter = current.chapters.find((chapter) => chapter.id === chapterId);
+    const targetProblem = targetChapter?.problems.find((problem) => problem.id === problemId);
+    if (!targetChapter || !targetProblem) return;
+    const targetState = getProblemState(targetProblem, currentRound);
+    if (!isSolvedStatus(targetState.status)) return;
+    const removeFromReview = Boolean(targetState.reviewDueAt);
+    const reviewCount = targetState.reviewCount ?? 0;
+    const nextInterval = reviewIntervals[Math.min(reviewCount, reviewIntervals.length - 1)];
+    const nextState: ProblemState = removeFromReview
+      ? { ...targetState, reviewScheduled: false, reviewDueAt: undefined }
+      : {
+          ...targetState,
+          reviewScheduled: true,
+          reviewCount,
+          reviewDueAt: new Date(clock + nextInterval * 86400000).toISOString(),
+        };
+    setMaterials((items) => items.map((material) => material.id !== current.id ? material : {
+      ...material,
+      chapters: material.chapters.map((chapter) => chapter.id !== chapterId ? chapter : {
+        ...chapter,
+        problems: chapter.problems.map((problem) => problem.id !== problemId
+          ? problem
+          : withProblemState(problem, currentRound, nextState)),
+      }),
+    }));
   };
 
   const resetProblem = (chapterId: string, problemId: number) => {
@@ -1321,6 +1357,7 @@ export default function Home() {
                             ...problem,
                             studiedOn: undefined,
                             status: "todo" as Status,
+                            reviewScheduled: false,
                             reviewCount: undefined,
                             reviewDueAt: undefined,
                             lastReviewedAt: undefined,
@@ -1617,7 +1654,7 @@ export default function Home() {
 
   const exportData = () => {
     const backup = {
-      version: 10,
+      version: 11,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -1814,7 +1851,7 @@ export default function Home() {
                   </article>
                 );
               })}
-              {reviewEntries.length === 0 && <div className="empty-state"><strong>復習予定はありません</strong><p>完了した学習単位には、次回の復習予定が自動で設定されます。</p></div>}
+              {reviewEntries.length === 0 && <div className="empty-state"><strong>復習予定はありません</strong><p>解決済みの問題の右下にある「↻」を押すと、復習予定へ追加できます。</p></div>}
             </div>
           </section>
         )}
@@ -2044,7 +2081,7 @@ export default function Home() {
           <div className="problem-toolbar">
             <div>
               <h3>章ごとの{getTrackLabel(currentMode)}</h3>
-              <p>{getStudyUnit(current, currentMode)}番号を押すと進捗が切り替わります。{currentMode === "exercise" ? "解決状況と復習予定は別々に記録されます。" : "読書の進み具合を記録できます。"}</p>
+              <p>{getStudyUnit(current, currentMode)}番号を押すと進捗が切り替わります。{currentMode === "exercise" ? "解決後、右下の「↻」で復習予定への追加・解除ができます。" : "読書の進み具合を記録できます。"}</p>
             </div>
             <select aria-label="状態で絞り込む" value={visibleFilter} onChange={(e) => setFilter(e.target.value as ProblemFilter)}>
               <option value="all">すべての状態</option>
@@ -2054,7 +2091,7 @@ export default function Home() {
           </div>
           <div className="legend">
             {getStatusOrder(current, currentMode).map((status) => <span key={status}><i className={`dot ${status}`} />{getStatusLabel(current, status, currentMode)}</span>)}
-            {currentMode === "exercise" && <span><i className="dot review" />復習予定（進捗と併記）</span>}
+            {currentMode === "exercise" && <span><i className="dot review" />復習予定（解決後に任意で追加）</span>}
           </div>
 
           <div className="chapters">
@@ -2088,7 +2125,14 @@ export default function Home() {
                           >
                             {problem.id}
                           </button>
-                          {reviewState && <span className={`problem-review ${reviewState}`} title={reviewText} aria-label={reviewText}>↻</span>}
+                          {currentMode === "exercise" && isSolvedStatus(problem.status) && (
+                            <button
+                              className={`problem-review ${reviewState ?? "available"}`}
+                              title={reviewState ? `${problem.id}${getStudyUnit(current, currentMode)}を復習予定から外す` : `${problem.id}${getStudyUnit(current, currentMode)}を復習予定に追加`}
+                              aria-label={reviewState ? `${problem.id}${getStudyUnit(current, currentMode)}を復習予定から外す` : `${problem.id}${getStudyUnit(current, currentMode)}を復習予定に追加`}
+                              onClick={() => toggleProblemReview(chapter.id, problem.id)}
+                            >↻</button>
+                          )}
                           {problem.status !== "todo" && (
                             <button
                               className="problem-reset"

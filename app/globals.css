@@ -136,7 +136,9 @@ button { color: inherit; }
 .problem:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(0,0,0,.08); }
 .problem-reset { position: absolute; top: -6px; right: -5px; width: 17px; height: 17px; padding: 0; display: grid; place-items: center; border: 2px solid var(--card); border-radius: 50%; background: #17375f; color: white; font: 700 10px/1 sans-serif; cursor: pointer; opacity: 0; transition: opacity .15s; z-index: 2; }
 .problem-wrap:hover .problem-reset, .problem-reset:focus-visible { opacity: 1; }
-.problem-review { position: absolute; right: -4px; bottom: -5px; z-index: 1; width: 15px; height: 15px; display: grid; place-items: center; border: 2px solid var(--card); border-radius: 50%; background: var(--muted); color: white; font: 700 9px/1 sans-serif; pointer-events: none; }
+.problem-review { position: absolute; right: -4px; bottom: -5px; z-index: 1; width: 17px; height: 17px; padding: 0; display: grid; place-items: center; border: 2px solid var(--card); border-radius: 50%; background: var(--muted); color: white; font: 700 9px/1 sans-serif; cursor: pointer; transition: opacity .15s, transform .15s; }
+.problem-review:hover, .problem-review:focus-visible { opacity: 1; transform: scale(1.12); }
+.problem-review.available { border-color: var(--line); background: var(--card); color: var(--muted); opacity: .65; }
 .problem-review.due { background: #183f73; }
 .problem-wrap.review-due .problem { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent); }
 .todo { background: var(--paper); border-color: var(--line); color: var(--muted); }
