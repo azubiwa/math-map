@@ -1010,14 +1010,19 @@ export default function Home() {
       return material.chapters.flatMap((chapter) => getChapterItems(chapter, mode).map((problem) => getProblemState(problem, round)));
     });
   });
-  const allRoundProblems = activeMaterials.flatMap((material) =>
-    getEnabledModes(material).flatMap((mode) =>
-      Array.from({ length: getRoundCount(material, mode) }, (_, index) =>
-        material.chapters.flatMap((chapter) => getChapterItems(chapter, mode).map((problem) => getProblemState(problem, index + 1))),
+  const allRoundProblemsForMode = (targetMode: StudyMode) => activeMaterials.flatMap((material) =>
+    !isTrackEnabled(material, targetMode) ? [] :
+      Array.from({ length: getRoundCount(material, targetMode) }, (_, index) =>
+        material.chapters.flatMap((chapter) => getChapterItems(chapter, targetMode).map((problem) => getProblemState(problem, index + 1))),
       ).flat(),
-    ),
   );
+  const allExerciseRoundProblems = allRoundProblemsForMode("exercise");
+  const allReadingRoundProblems = allRoundProblemsForMode("reading");
+  const allRoundProblems = [...allExerciseRoundProblems, ...allReadingRoundProblems];
   const solved = allRoundProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
+  const exerciseSolved = allExerciseRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
+  const readingCompleted = allReadingRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
+  const reviewCompleted = allExerciseRoundProblems.reduce((sum, problem) => sum + (problem.reviewCount ?? 0), 0);
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
   const overall = activeMaterials.length
     ? Math.round(activeMaterials.reduce((sum, material) => sum + materialPct(material), 0) / activeMaterials.length)
@@ -1057,14 +1062,37 @@ export default function Home() {
   const lockedTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() > clock);
   const nextTimedReward = lockedTimedRewards[0];
   const nextReview = upcomingReviews[0];
-  const milestoneSteps = [10, 25, 50, 100, 250, 500];
-  const unlockedMilestones = milestoneSteps.filter((step) => solved >= step);
   const completedRounds = activeMaterials.flatMap((material) =>
     getEnabledModes(material).flatMap((mode) =>
       Array.from({ length: getRoundCount(material, mode) }, (_, index) => pct(material.chapters, index + 1, mode) === 100),
     ),
   ).filter(Boolean).length;
-  const nextMilestone = milestoneSteps.find((step) => solved < step);
+  const completedChapters = activeMaterials.reduce((total, material) => total + getEnabledModes(material).reduce((modeTotal, mode) => (
+    modeTotal + Array.from({ length: getRoundCount(material, mode) }, (_, index) => index + 1).reduce((roundTotal, round) => (
+      roundTotal + material.chapters.filter((chapter) => getChapterItems(chapter, mode).length > 0 && pct([chapter], round, mode) === 100).length
+    ), 0)
+  ), 0), 0);
+  const bestStreak = longestStreak(pointDays);
+  const milestoneGroups = [
+    { id: "total", title: "完了単位", description: "演習と読書の合計", value: solved, unit: "単位", steps: [10, 25, 50, 100, 250, 500] },
+    { id: "exercise", title: "演習の解決", description: "自力・解答参照を含む", value: exerciseSolved, unit: "問", steps: [10, 50, 100, 250] },
+    { id: "reading", title: "読書の完了", description: "読了した記録単位", value: readingCompleted, unit: "単位", steps: [10, 25, 50, 100] },
+    { id: "review", title: "復習の記録", description: "復習を完了した回数", value: reviewCompleted, unit: "回", steps: [10, 30, 100, 250] },
+    { id: "days", title: "累計学習日", description: "学習を記録した日数", value: pointDays.length, unit: "日", steps: [7, 30, 100, 365] },
+    { id: "streak", title: "連続学習", description: "これまでの最長日数", value: bestStreak, unit: "日", steps: [3, 7, 14, 30, 100] },
+    { id: "chapters", title: "章の完了", description: "内容・周回ごとに集計", value: completedChapters, unit: "章", steps: [1, 5, 10, 25] },
+    { id: "rounds", title: "周回の完了", description: "読書・演習を個別集計", value: completedRounds, unit: "周", steps: [1, 3, 5, 10] },
+    { id: "points", title: "累計ポイント", description: "すべての加算記録", value: studyPoints, unit: "pt", steps: [100, 500, 1000, 2500] },
+  ];
+  const achievedMilestoneCount = milestoneGroups.reduce((sum, group) => sum + group.steps.filter((step) => group.value >= step).length, 0);
+  const milestoneTargetCount = milestoneGroups.reduce((sum, group) => sum + group.steps.length, 0);
+  const nextMilestone = milestoneGroups
+    .map((group) => {
+      const target = group.steps.find((step) => group.value < step);
+      return target ? { ...group, target, remaining: target - group.value, progress: group.value / target } : null;
+    })
+    .filter((milestone) => milestone !== null)
+    .sort((a, b) => b.progress - a.progress)[0];
   const enabledExams = exams.filter((exam) => exam.enabled);
   const nextExam = [...enabledExams].sort((a, b) => {
     if (!a.date) return 1;
@@ -1855,13 +1883,23 @@ export default function Home() {
               </div>
             </section>
             <section className="milestone-section">
-              <div className="section-heading"><div><p className="eyebrow">MILESTONES</p><h3>マイルストーン</h3></div>{nextMilestone && <span>次は {nextMilestone}単位まであと{nextMilestone - solved}単位</span>}</div>
+              <div className="section-heading"><div><p className="eyebrow">MILESTONES</p><h3>マイルストーン</h3></div><span>{achievedMilestoneCount} / {milestoneTargetCount}段階を達成</span></div>
               <div className="milestone-grid">
-                {milestoneSteps.map((step) => {
-                  const unlocked = solved >= step;
-                  return <article className={unlocked ? "unlocked" : ""} key={step}><span>{unlocked ? "✓" : "◇"}</span><strong>{step}単位 完了</strong><small>{unlocked ? "達成しました" : `${Math.min(solved, step)} / ${step}単位`}</small></article>;
+                {milestoneGroups.map((group) => {
+                  const achieved = group.steps.filter((step) => group.value >= step).length;
+                  const next = group.steps.find((step) => group.value < step);
+                  const complete = next === undefined;
+                  return (
+                    <article className={`milestone-kind ${achieved > 0 ? "has-achievement" : ""} ${complete ? "unlocked" : ""}`} key={group.id}>
+                      <div className="milestone-kind-head"><span>{complete ? "✓" : achieved}</span><div><strong>{group.title}</strong><small>{group.description}</small></div></div>
+                      <div className="milestone-value"><b>{group.value}</b><small>{group.unit}</small></div>
+                      <div className="milestone-levels" aria-label={`${group.title}の達成段階`}>
+                        {group.steps.map((step) => <span className={group.value >= step ? "achieved" : ""} key={step}>{step}</span>)}
+                      </div>
+                      <p>{next === undefined ? "すべての段階を達成" : `${next}${group.unit}まであと${next - group.value}${group.unit}`}</p>
+                    </article>
+                  );
                 })}
-                <article className={completedRounds > 0 ? "unlocked" : ""}><span>{completedRounds > 0 ? "✓" : "◇"}</span><strong>教材の周回完了</strong><small>{completedRounds > 0 ? `${completedRounds}周完了` : "最初の1周を100%へ"}</small></article>
               </div>
             </section>
           </section>
@@ -1942,7 +1980,7 @@ export default function Home() {
         <section className="quick-stats" aria-label="目標と実績">
           <button onClick={() => setView("goals")}><span>今週の目標</span><strong>{weekCount}<small> / {goals.weekly}件</small></strong><i><b style={{ width: `${goalPercent(weekCount, goals.weekly)}%` }} /></i></button>
           <button onClick={() => setView("goals")}><span>連続学習</span><strong>{streak}<small>日</small></strong><em>学習記録の連続日数</em></button>
-          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{unlockedMilestones.length + (completedRounds > 0 ? 1 : 0)}<small>項目完了</small></strong><em>{nextMilestone ? `次は${nextMilestone}単位` : "全項目を完了"}</em></button>
+          <button onClick={() => setView("goals")}><span>マイルストーン</span><strong>{achievedMilestoneCount}<small>段階達成</small></strong><em>{nextMilestone ? `次は${nextMilestone.title} ${nextMilestone.target}${nextMilestone.unit}` : "すべての段階を達成"}</em></button>
           {nextExam && <button className="exam-quick" onClick={() => setView("exam")}><span>{nextExam.name.trim() || "直近の試験"}</span><strong>{nextExamDays === null ? "日付未設定" : nextExamDays >= 0 ? `あと${nextExamDays}日` : "試験終了"}</strong><em>{nextExamMaterial?.title}</em></button>}
         </section>
 
