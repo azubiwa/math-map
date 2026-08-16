@@ -136,21 +136,14 @@ button { color: inherit; }
 .problem:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(0,0,0,.08); }
 .problem-reset { position: absolute; top: -6px; right: -5px; width: 17px; height: 17px; padding: 0; display: grid; place-items: center; border: 2px solid var(--card); border-radius: 50%; background: #17375f; color: white; font: 700 10px/1 sans-serif; cursor: pointer; opacity: 0; transition: opacity .15s; z-index: 2; }
 .problem-wrap:hover .problem-reset, .problem-reset:focus-visible { opacity: 1; }
-.problem-review { position: absolute; right: -4px; bottom: -5px; z-index: 1; width: 17px; height: 17px; padding: 0; display: grid; place-items: center; border: 2px solid var(--card); border-radius: 50%; background: var(--muted); color: white; font: 700 9px/1 sans-serif; cursor: pointer; transition: opacity .15s, transform .15s; }
-.problem-review:hover, .problem-review:focus-visible { opacity: 1; transform: scale(1.12); }
-.problem-review.available { border-color: var(--line); background: var(--card); color: var(--muted); opacity: .65; }
-.problem-review.due { background: #183f73; }
-.problem-wrap.review-due .problem { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent); }
 .todo { background: var(--paper); border-color: var(--line); color: var(--muted); }
 .trying { background: #dbeafe; color: #174c96; border: 1px dashed #3b82f6; }
 .solved { background: var(--accent); color: white; }
 .with-answer { background: #b9d5fb; color: #123f7d; }
-.review { background: #edf3fc; color: #2e568e; border: 1px dotted #2e67b2; }
 .dot.todo { background: var(--line); }
 .dot.trying { background: #93c5fd; }
 .dot.solved { background: var(--accent); }
 .dot.with-answer { background: var(--blue); }
-.dot.review { background: #dbeafe; border: 1px solid #2e67b2; }
 .empty { color: var(--muted); font-size: 11px; grid-column: 1 / -1; }
 
 .view-panel { min-height: 560px; }
@@ -161,8 +154,8 @@ button { color: inherit; }
 .material-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
 .material-open { width: 100%; border: 0; background: transparent; text-align: left; display: flex; align-items: center; gap: 13px; cursor: pointer; padding: 0; color: var(--ink); }
 .book-chip { width: 40px; height: 50px; display: grid; place-items: center; flex: 0 0 auto; color: white; border-radius: 5px 9px 9px 5px; box-shadow: inset 5px 0 rgba(0,0,0,.12); }
-.material-open small, .review-item small { color: var(--muted); font-size: 9px; }
-.material-open h3, .review-item h3 { margin: 3px 0 4px; font-size: 13px; }
+.material-open small { color: var(--muted); font-size: 9px; }
+.material-open h3 { margin: 3px 0 4px; font-size: 13px; }
 .material-open p { margin: 0; color: var(--muted); font-size: 10px; }
 .material-card-progress { margin: 20px 0 14px; }
 .track-progress-list { display: grid; gap: 10px; }
@@ -182,14 +175,9 @@ button { color: inherit; }
 .archive-list article div { display: grid; gap: 3px; }
 .archive-list small { color: var(--muted); font-size: 9px; }
 .archive-list strong { font-size: 12px; }
-.review-list { display: grid; gap: 9px; }
-.review-item { display: grid; grid-template-columns: 42px 1fr auto; align-items: center; gap: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 13px 16px; }
-.review-number { width: 42px; height: 42px; display: grid; place-items: center; background: #edf3fc; color: #2e568e; border: 1px dotted #2e67b2; border-radius: 8px; font-weight: 800; }
-.review-time { margin: 3px 0 0; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
-.review-time.due { color: var(--accent); font-weight: 700; }
 .empty-state { padding: 70px 20px; text-align: center; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .empty-state p { color: var(--muted); font-size: 11px; }
-.history-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+.history-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
 .history-grid article { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: center; }
 .history-grid article > span { color: var(--muted); font-size: 9px; }
 .history-grid strong { grid-column: 1 / -1; font: 600 27px Georgia, serif; }
@@ -207,7 +195,7 @@ button { color: inherit; }
 .quick-stats button > i b { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
 .quick-stats .exam-quick { background: var(--navy); color: white; border-color: var(--navy); }
 .quick-stats .exam-quick > span, .quick-stats .exam-quick em { color: #b9cce3; }
-.time-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: -16px 0 32px; }
+.time-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: -16px 0 32px; }
 .time-card { min-height: 150px; display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .time-card.complete { border-color: #75aaec; }
 .time-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -356,14 +344,12 @@ button { color: inherit; }
 .dark .card-heading > span { color: #d9eaff; background: #254d7f; }
 .dark .trying { background: #24466f; color: #f4f8ff; }
 .dark .with-answer { background: #315e99; color: white; }
-.dark .review, .dark .review-number { background: #1c3555; color: white; border-color: #7db2f7; }
 .dark .todo { color: #dceaff; }
 .dark .sidebar, .dark .sidebar button { color: white; }
 .dark .material-link, .dark .nav-item, .dark .add-link { color: #b8cae1; }
 .dark .material-link.selected, .dark .nav-item.active { color: white; }
 .dark .primary-button { background: #3b82f6; color: white; }
 .dark .book-title > span, .dark .book-chip, .dark .problem.solved { color: white; }
-.dark .review-number { background: #183455; color: white; border-color: #75aaec; }
 .dark .chapter-complete-label { color: #9cc7ff; border-color: #5d94d8; }
 .dark .milestone-levels span.achieved { background: #1f4a7e; color: white; border-color: #659ee4; }
 
@@ -411,8 +397,6 @@ button { color: inherit; }
   .chapter-draft { flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .chapter-draft > input { flex-basis: calc(100% - 64px); }
   .chapter-draft > label { margin-left: 32px; }
-  .review-item { grid-template-columns: 38px 1fr; }
-  .review-item .secondary-button { grid-column: 1 / -1; }
   .quick-stats { grid-template-columns: 1fr 1fr; }
   .time-overview { grid-template-columns: 1fr; }
   .material-actions { grid-template-columns: 38px 38px 1fr; }

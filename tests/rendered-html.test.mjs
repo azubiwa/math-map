@@ -12,9 +12,7 @@ test("exports Math Map", async () => {
   assert.match(html, /時限達成報酬/);
   assert.match(html, /クラウド同期|端末保存/);
   assert.match(html, /class="overall-points"/);
-  assert.match(html, /右下の「↻」で復習予定への追加・解除ができます/);
-  assert.match(html, /復習予定（解決後に任意で追加）/);
-  assert.doesNotMatch(html, /復習待ち/);
+  assert.doesNotMatch(html, /復習予定|復習可能|右下の「↻」/);
   assert.doesNotMatch(html, /週間ボス|宝箱|ミッション|熟成/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
@@ -27,21 +25,17 @@ test("supports reading and exercise tracks in one material", async () => {
   assert.match(source, /readingEnabled/);
   assert.match(source, /exerciseEnabled/);
   assert.match(source, /className="track-switch"/);
-  assert.match(source, /currentMode === "exercise" && <option value="review-due">復習可能<\/option>/);
 });
 
-test("keeps solving and review scheduling independent", async () => {
+test("removes review scheduling from data and interface", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /const toggleProblemReview/);
-  assert.match(source, /reviewScheduled: true/);
-  assert.match(source, /reviewScheduled: false/);
-  assert.match(source, /className={`problem-review \${reviewState \?\? "available"}`}/);
-  assert.doesNotMatch(source, /nextStatus === "solved" && currentMode === "exercise"/);
+  assert.match(source, /return \{ id: problem\.id, \.\.\.baseState, rounds \};/);
+  assert.doesNotMatch(source, /reviewScheduled|reviewDueAt|reviewCount|reviewIntervals|review-due|toggleProblemReview|復習予定|復習可能/);
 });
 
 test("provides milestone categories for different study records", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  for (const label of ["完了単位", "演習の解決", "読書の完了", "復習の記録", "累計学習日", "連続学習", "章の完了", "周回の完了", "累計ポイント"]) {
+  for (const label of ["完了単位", "演習の解決", "読書の完了", "累計学習日", "連続学習", "章の完了", "周回の完了", "累計ポイント"]) {
     assert.match(source, new RegExp(label));
   }
   assert.match(source, /milestone-levels/);
