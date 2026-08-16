@@ -5,17 +5,12 @@ import type { User } from "@supabase/supabase-js";
 import { cloudSyncConfigured, supabase } from "@/lib/supabase";
 
 type Status = "todo" | "trying" | "solved" | "with-answer";
-type LegacyStatus = Status | "review";
 type StudyMode = "exercise" | "reading";
 type StudyUnit = "問" | "節" | "ページ" | "項目";
 type MaterialKind = "教科書" | "参考書" | "授業";
 type ProblemState = {
   status: Status;
   studiedOn?: string;
-  reviewScheduled?: boolean;
-  reviewCount?: number;
-  reviewDueAt?: string;
-  lastReviewedAt?: string;
 };
 type Problem = ProblemState & { id: number; rounds?: Record<string, ProblemState> };
 type Chapter = { id: string; title: string; problems: Problem[]; readingItems?: Problem[] };
@@ -40,29 +35,20 @@ type Material = {
   roundCount?: number;
   activeRound?: number;
 };
-type View = "home" | "materials" | "review" | "history" | "goals" | "exam";
-type ProblemFilter = Status | "review-due" | "all";
+type View = "home" | "materials" | "history" | "goals" | "exam";
+type ProblemFilter = Status | "all";
 type ChapterDraft = { id?: string; title: string; exerciseCount: number; readingCount: number };
 type Goals = { weekly: number; monthly: number };
 type ExamSettings = { id: string; enabled: boolean; name: string; date: string; materialId: string; round?: number };
 type PointAward = { key: string; points: number; label: string; earnedOn: string };
 type StudyEvent = {
   id: string;
-  type: "study" | "solve" | "review";
+  type: "study" | "solve";
   date: string;
   problemKey?: string;
 };
 type TimedReward = { id: string; unlockAt: string; expiresAt: string };
 type TimedRewardState = { solvedProgress: number; rewards: TimedReward[] };
-type ReviewEntry = {
-  material: Material;
-  chapter: Chapter;
-  problem: Problem;
-  round: number;
-  state: ProblemState;
-  dueTime: number;
-  mode: "exercise";
-};
 type StudySnapshot = {
   version: number;
   exportedAt: string;
@@ -78,9 +64,8 @@ type StudySnapshot = {
 type PendingCloudData = { snapshot: StudySnapshot; updatedAt: string };
 type SyncStatus = "local" | "checking" | "choose" | "synced" | "error";
 
-const dailyTargets = { study: 3, solve: 2, review: 1 };
+const dailyTargets = { study: 3, solve: 2 };
 const weeklyTarget = 100;
-const reviewIntervals = [1, 3, 7, 14, 30];
 const timedRewardRequiredSolves = 5;
 const timedRewardDelayMs = 3 * 60 * 60 * 1000;
 const timedRewardWindowMs = 24 * 60 * 60 * 1000;
@@ -173,7 +158,6 @@ function getCompletionLabel(material: Material, mode = getStudyMode(material)) {
   return mode === "reading" ? "読了" : "解決";
 }
 
-const seedReviewDueAt = "2025-01-01T00:00:00.000Z";
 const linearSeedStatuses: Status[] = ["solved", "solved", "with-answer", "solved", "todo", "trying", "solved", "todo", "todo", "with-answer", "solved", "todo", "solved", "todo"];
 
 const seed: Material[] = [
@@ -191,7 +175,6 @@ const seed: Material[] = [
         problems: linearSeedStatuses.map((status, i) => ({
           id: i + 1,
           status,
-          ...((i === 3 || i === 12) ? { reviewScheduled: true, reviewCount: 0, reviewDueAt: seedReviewDueAt } : {}),
         })),
       },
       {
@@ -228,7 +211,7 @@ const seed: Material[] = [
           ...(i < 6
             ? { status: "solved" as Status }
             : i === 6
-              ? { status: "solved" as Status, reviewScheduled: true, reviewCount: 0, reviewDueAt: seedReviewDueAt }
+              ? { status: "solved" as Status }
               : { status: "todo" as Status }),
         })),
       },
@@ -304,10 +287,6 @@ function getProblemState(problem: Problem, round: number): ProblemState {
     return {
       status: problem.status,
       studiedOn: problem.studiedOn,
-      reviewScheduled: problem.reviewScheduled,
-      reviewCount: problem.reviewCount,
-      reviewDueAt: problem.reviewDueAt,
-      lastReviewedAt: problem.lastReviewedAt,
     };
   }
   return problem.rounds?.[String(round)] ?? { status: "todo" };
@@ -319,30 +298,16 @@ function withProblemState(problem: Problem, round: number, state: ProblemState):
 }
 
 function normalizeProblemState(value: unknown, studyMode: StudyMode): ProblemState {
-  const candidate = value && typeof value === "object" ? value as Partial<Omit<ProblemState, "status">> & { status?: LegacyStatus } : {};
-  const legacyReview = candidate.status === "review";
+  const candidate = value && typeof value === "object" ? value as Partial<ProblemState> : {};
   const validStatus = candidate.status === "todo"
     || candidate.status === "trying"
     || candidate.status === "solved"
     || candidate.status === "with-answer";
-  let status: Status = validStatus ? candidate.status as Status : legacyReview ? "solved" : "todo";
+  let status: Status = validStatus ? candidate.status as Status : "todo";
   if (studyMode === "reading" && status === "with-answer") status = "solved";
-  const reviewCount = typeof candidate.reviewCount === "number" ? candidate.reviewCount : undefined;
-  const lastReviewedAt = typeof candidate.lastReviewedAt === "string" ? candidate.lastReviewedAt : undefined;
-  const reviewScheduled = typeof candidate.reviewScheduled === "boolean"
-    ? candidate.reviewScheduled
-    : legacyReview || (reviewCount ?? 0) > 0 || Boolean(lastReviewedAt);
   return {
     status,
     studiedOn: typeof candidate.studiedOn === "string" ? candidate.studiedOn : undefined,
-    reviewScheduled,
-    reviewCount,
-    reviewDueAt: reviewScheduled && typeof candidate.reviewDueAt === "string"
-      ? candidate.reviewDueAt
-      : legacyReview
-        ? "1970-01-01T00:00:00.000Z"
-        : undefined,
-    lastReviewedAt,
   };
 }
 
@@ -351,7 +316,7 @@ function normalizeProblem(problem: Problem, studyMode: StudyMode): Problem {
   const rounds = problem.rounds && typeof problem.rounds === "object"
     ? Object.fromEntries(Object.entries(problem.rounds).map(([round, state]) => [round, normalizeProblemState(state, studyMode)]))
     : undefined;
-  return { ...problem, ...baseState, rounds };
+  return { id: problem.id, ...baseState, rounds };
 }
 
 function normalizeMaterials(value: unknown): Material[] | null {
@@ -473,7 +438,7 @@ function validStudyEvents(value: unknown): StudyEvent[] | null {
     if (!event || typeof event !== "object") return false;
     const candidate = event as Partial<StudyEvent>;
     const valid = typeof candidate.id === "string"
-      && (candidate.type === "study" || candidate.type === "solve" || candidate.type === "review")
+      && (candidate.type === "study" || candidate.type === "solve")
       && typeof candidate.date === "string";
     if (!valid || ids.has(candidate.id!)) return false;
     ids.add(candidate.id!);
@@ -561,7 +526,6 @@ function dailyEventProgress(events: StudyEvent[], date: string) {
   return {
     study: todayEvents.filter((event) => event.type === "study").length,
     solve: todayEvents.filter((event) => event.type === "solve").length,
-    review: todayEvents.filter((event) => event.type === "review").length,
   };
 }
 
@@ -569,7 +533,6 @@ function weeklyEventScore(events: StudyEvent[], from: string, to: string) {
   return events.reduce((score, event) => {
     if (event.date < from || event.date >= to) return score;
     if (event.type === "solve") return score + 3;
-    if (event.type === "review") return score + 2;
     return score + 1;
   }, 0);
 }
@@ -715,7 +678,7 @@ export default function Home() {
   const skipNextCloudPush = useRef(false);
   const lastSyncedAtRef = useRef("");
   const latestSnapshotRef = useRef<StudySnapshot>({
-    version: 11,
+    version: 12,
     exportedAt: new Date().toISOString(),
     materials: seed,
     activity: {},
@@ -742,7 +705,7 @@ export default function Home() {
 
   useEffect(() => {
     latestSnapshotRef.current = {
-      version: 11,
+      version: 12,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -992,26 +955,6 @@ export default function Home() {
   const currentRound = current ? getActiveRound(current, currentMode) : 1;
   const now = new Date(clock);
   const todayKey = localDateKey(now);
-  const reviewEntries: ReviewEntry[] = activeMaterials.flatMap((material) =>
-    !isTrackEnabled(material, "exercise") ? [] : Array.from({ length: getRoundCount(material, "exercise") }, (_, index) => index + 1).flatMap((round) =>
-      material.chapters.flatMap((chapter) => getChapterItems(chapter, "exercise").flatMap((problem) => {
-        const state = getProblemState(problem, round);
-        if (!isSolvedStatus(state.status) || !state.reviewDueAt) return [];
-        return [{
-          material,
-          chapter,
-          problem,
-          round,
-          state,
-          dueTime: state.reviewDueAt ? new Date(state.reviewDueAt).getTime() : 0,
-          mode: "exercise" as const,
-        }];
-      })),
-    ),
-  ).sort((a, b) => a.dueTime - b.dueTime);
-  const dueReviews = reviewEntries.filter((entry) => entry.dueTime <= clock);
-  const upcomingReviews = reviewEntries.filter((entry) => entry.dueTime > clock);
-  const review = dueReviews.length;
   const totalProblems = activeMaterials.flatMap((material) => {
     return getEnabledModes(material).flatMap((mode) => {
       const round = getActiveRound(material, mode);
@@ -1030,7 +973,6 @@ export default function Home() {
   const solved = allRoundProblems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
   const exerciseSolved = allExerciseRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
   const readingCompleted = allReadingRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
-  const reviewCompleted = allExerciseRoundProblems.reduce((sum, problem) => sum + (problem.reviewCount ?? 0), 0);
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
   const overall = activeMaterials.length
     ? Math.round(activeMaterials.reduce((sum, material) => sum + materialPct(material), 0) / activeMaterials.length)
@@ -1056,11 +998,9 @@ export default function Home() {
   const streak = useMemo(() => streakFromDays(pointDays), [pointDays]);
   const dailyProgress = dailyEventProgress(studyEvents, todayKey);
   const dailyCompleted = dailyProgress.study >= dailyTargets.study
-    && dailyProgress.solve >= dailyTargets.solve
-    && dailyProgress.review >= dailyTargets.review;
+    && dailyProgress.solve >= dailyTargets.solve;
   const dailyCompletedCount = Number(dailyProgress.study >= dailyTargets.study)
-    + Number(dailyProgress.solve >= dailyTargets.solve)
-    + Number(dailyProgress.review >= dailyTargets.review);
+    + Number(dailyProgress.solve >= dailyTargets.solve);
   const weekStartKey = localDateKey(weekStart);
   const weekEndKey = localDateKey(weekEnd);
   const weeklyScore = weeklyEventScore(studyEvents, weekStartKey, weekEndKey);
@@ -1069,7 +1009,6 @@ export default function Home() {
   const readyTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() <= clock);
   const lockedTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() > clock);
   const nextTimedReward = lockedTimedRewards[0];
-  const nextReview = upcomingReviews[0];
   const completedRounds = activeMaterials.flatMap((material) =>
     getEnabledModes(material).flatMap((mode) =>
       Array.from({ length: getRoundCount(material, mode) }, (_, index) => pct(material.chapters, index + 1, mode) === 100),
@@ -1085,7 +1024,6 @@ export default function Home() {
     { id: "total", title: "完了単位", description: "演習と読書の合計", value: solved, unit: "単位", steps: [10, 25, 50, 100, 250, 500] },
     { id: "exercise", title: "演習の解決", description: "自力・解答参照を含む", value: exerciseSolved, unit: "問", steps: [10, 50, 100, 250] },
     { id: "reading", title: "読書の完了", description: "読了した記録単位", value: readingCompleted, unit: "単位", steps: [10, 25, 50, 100] },
-    { id: "review", title: "復習の記録", description: "復習を完了した回数", value: reviewCompleted, unit: "回", steps: [10, 30, 100, 250] },
     { id: "days", title: "累計学習日", description: "学習を記録した日数", value: pointDays.length, unit: "日", steps: [7, 30, 100, 365] },
     { id: "streak", title: "連続学習", description: "これまでの最長日数", value: bestStreak, unit: "日", steps: [3, 7, 14, 30, 100] },
     { id: "chapters", title: "章の完了", description: "内容・周回ごとに集計", value: completedChapters, unit: "章", steps: [1, 5, 10, 25] },
@@ -1111,16 +1049,14 @@ export default function Home() {
   const nextExamDays = nextExam?.date ? Math.ceil((new Date(`${nextExam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
   const dateLabel = new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "long", day: "numeric", weekday: "long" }).format(now);
 
-  const visibleFilter: ProblemFilter = current && filter !== "all" && filter !== "review-due" && !getStatusOrder(current, currentMode).includes(filter)
-    ? "all"
-    : currentMode === "reading" && filter === "review-due" ? "all" : filter;
+  const visibleFilter: ProblemFilter = current && filter !== "all" && !getStatusOrder(current, currentMode).includes(filter)
+    ? "all" : filter;
   const filteredChapters = current?.chapters.map((chapter) => ({
     ...chapter,
     problems: getChapterItems(chapter, currentMode)
       .map((problem) => ({ ...problem, ...getProblemState(problem, currentRound) }))
       .filter((problem) => visibleFilter === "all"
-        || problem.status === visibleFilter
-        || (visibleFilter === "review-due" && Boolean(problem.reviewDueAt) && new Date(problem.reviewDueAt!).getTime() <= clock)),
+        || problem.status === visibleFilter),
   })) ?? [];
 
   const firstStudyAwards = (today: string) => {
@@ -1155,7 +1091,6 @@ export default function Home() {
     if (
       nextDailyProgress.study >= dailyTargets.study
       && nextDailyProgress.solve >= dailyTargets.solve
-      && nextDailyProgress.review >= dailyTargets.review
       && !prospectiveAwards.some((award) => award.key === `daily-goal:${todayKey}`)
     ) {
       automaticAwards.push({ key: `daily-goal:${todayKey}`, points: 10, label: "日次目標を達成", earnedOn: todayKey });
@@ -1169,7 +1104,7 @@ export default function Home() {
     const allNewAwards = [...newAwards, ...automaticAwards];
     if (newEvents.length > 0) {
       setStudyEvents(nextEvents);
-      const activityEvents = newEvents.filter((event) => event.type === "study" || event.type === "review");
+      const activityEvents = newEvents.filter((event) => event.type === "study");
       if (activityEvents.length > 0) {
         setActivity((days) => {
           const next = { ...days };
@@ -1215,41 +1150,6 @@ export default function Home() {
     grantPointAwards([{ key: `timed-reward:${reward.id}`, points: 15, label: "時限達成報酬を受領", earnedOn: todayKey }]);
   };
 
-  const recordReview = (entry: ReviewEntry) => {
-    const problemKey = trackAwardId(entry.material, "exercise", entry.round, entry.chapter.id, entry.problem.id);
-    const reviewCount = entry.state.reviewCount ?? 0;
-    const reviewEvent: StudyEvent = {
-      id: `review:${todayKey}:${problemKey}:${reviewCount}`,
-      type: "review",
-      date: todayKey,
-      problemKey,
-    };
-    const awards: PointAward[] = [
-      ...firstStudyAwards(todayKey),
-      { key: `review:${problemKey}:${reviewCount}`, points: 3, label: "復習を記録", earnedOn: todayKey },
-    ];
-    if (entry.dueTime > 0 && clock <= entry.dueTime + 86400000) {
-      awards.push({ key: `review-timing:${problemKey}:${reviewCount}`, points: 2, label: "予定期間内に復習", earnedOn: todayKey });
-    }
-    const nextReviewCount = reviewCount + 1;
-    const nextInterval = reviewIntervals[Math.min(nextReviewCount, reviewIntervals.length - 1)];
-    const nextReviewAt = new Date(clock + nextInterval * 86400000).toISOString();
-    setMaterials((items) => items.map((material) => material.id !== entry.material.id ? material : {
-      ...material,
-      chapters: material.chapters.map((chapter) => chapter.id !== entry.chapter.id ? chapter : {
-        ...chapter,
-        problems: chapter.problems.map((problem) => problem.id !== entry.problem.id ? problem : withProblemState(problem, entry.round, {
-          ...entry.state,
-          reviewScheduled: true,
-          reviewCount: nextReviewCount,
-          reviewDueAt: nextReviewAt,
-          lastReviewedAt: new Date(clock).toISOString(),
-        })),
-      }),
-    }));
-    grantPointAwards(awards, [reviewEvent]);
-  };
-
   const cycleProblem = (chapterId: string, problemId: number) => {
     const targetChapter = current.chapters.find((chapter) => chapter.id === chapterId);
     const targetProblem = targetChapter && getChapterItems(targetChapter, currentMode).find((problem) => problem.id === problemId);
@@ -1289,10 +1189,7 @@ export default function Home() {
     const firstSolve = nextStatus === "solved" && !pointAwards.some((award) => award.key === `solve:${awardId}`);
     grantPointAwards(awards, events);
     if (firstSolve) advanceTimedReward();
-    let nextState: ProblemState = { ...targetState, studiedOn: targetState.studiedOn ?? today, status: nextStatus };
-    if (nextStatus === "todo") {
-      nextState = { ...nextState, reviewScheduled: false, reviewCount: undefined, reviewDueAt: undefined, lastReviewedAt: undefined };
-    }
+    const nextState: ProblemState = { ...targetState, studiedOn: targetState.studiedOn ?? today, status: nextStatus };
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -1309,39 +1206,10 @@ export default function Home() {
     );
   };
 
-  const toggleProblemReview = (chapterId: string, problemId: number) => {
-    if (currentMode !== "exercise") return;
-    const targetChapter = current.chapters.find((chapter) => chapter.id === chapterId);
-    const targetProblem = targetChapter?.problems.find((problem) => problem.id === problemId);
-    if (!targetChapter || !targetProblem) return;
-    const targetState = getProblemState(targetProblem, currentRound);
-    if (!isSolvedStatus(targetState.status)) return;
-    const removeFromReview = Boolean(targetState.reviewDueAt);
-    const reviewCount = targetState.reviewCount ?? 0;
-    const nextInterval = reviewIntervals[Math.min(reviewCount, reviewIntervals.length - 1)];
-    const nextState: ProblemState = removeFromReview
-      ? { ...targetState, reviewScheduled: false, reviewDueAt: undefined }
-      : {
-          ...targetState,
-          reviewScheduled: true,
-          reviewCount,
-          reviewDueAt: new Date(clock + nextInterval * 86400000).toISOString(),
-        };
-    setMaterials((items) => items.map((material) => material.id !== current.id ? material : {
-      ...material,
-      chapters: material.chapters.map((chapter) => chapter.id !== chapterId ? chapter : {
-        ...chapter,
-        problems: chapter.problems.map((problem) => problem.id !== problemId
-          ? problem
-          : withProblemState(problem, currentRound, nextState)),
-      }),
-    }));
-  };
-
   const resetProblem = (chapterId: string, problemId: number) => {
     const problemKey = trackAwardId(current, currentMode, currentRound, chapterId, problemId);
     const removedEvents = studyEvents.filter((event) => event.problemKey === problemKey);
-    const removedActivity = removedEvents.filter((event) => event.type === "study" || event.type === "review");
+    const removedActivity = removedEvents.filter((event) => event.type === "study");
     setMaterials((items) =>
       items.map((material) =>
         material.id !== current.id
@@ -1357,10 +1225,6 @@ export default function Home() {
                             ...problem,
                             studiedOn: undefined,
                             status: "todo" as Status,
-                            reviewScheduled: false,
-                            reviewCount: undefined,
-                            reviewDueAt: undefined,
-                            lastReviewedAt: undefined,
                           };
                         }
                         const rounds = { ...problem.rounds, [String(currentRound)]: { status: "todo" as Status } };
@@ -1654,7 +1518,7 @@ export default function Home() {
 
   const exportData = () => {
     const backup = {
-      version: 11,
+      version: 12,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -1731,7 +1595,6 @@ export default function Home() {
         <nav className="main-nav" aria-label="メインナビゲーション">
           <button className={`nav-item ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}><span>⌂</span>ホーム</button>
           <button className={`nav-item ${view === "materials" ? "active" : ""}`} onClick={() => setView("materials")}><span>▦</span>教材一覧</button>
-          <button className={`nav-item ${view === "review" ? "active" : ""}`} onClick={() => setView("review")}><span>↻</span>復習予定 <b>{review}</b></button>
           <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}><span>▥</span>学習記録</button>
           <button className={`nav-item ${view === "goals" ? "active" : ""}`} onClick={() => setView("goals")}><span>◎</span>目標・実績</button>
           <button className={`nav-item ${view === "exam" ? "active" : ""}`} onClick={() => setView("exam")}><span>旗</span>試験モード</button>
@@ -1831,31 +1694,6 @@ export default function Home() {
           </section>
         )}
 
-        {view === "review" && (
-          <section className="view-panel">
-            <div className="view-heading"><div><p className="eyebrow">REVIEW SCHEDULE</p><h2>復習予定</h2><p>復習可能 {dueReviews.length}件・今後の予定 {upcomingReviews.length}件</p></div></div>
-            <div className="review-list">
-              {reviewEntries.slice(0, 80).map((entry) => {
-                const due = entry.dueTime <= clock;
-                return (
-                  <article className="review-item" key={`${entry.material.id}-${entry.round}-${entry.chapter.id}-${entry.problem.id}`}>
-                    <span className="review-number">{entry.problem.id}</span>
-                    <div>
-                      <small>{entry.material.title}・第{entry.round}周</small>
-                      <h3>{entry.chapter.title}・{getStudyUnit(entry.material, "exercise")} {entry.problem.id}</h3>
-                      <p className={due ? "review-time due" : "review-time"}>{due ? "復習可能" : `予定まで ${formatRemaining(entry.dueTime - clock)}`}</p>
-                    </div>
-                    {due
-                      ? <button className="secondary-button" onClick={() => recordReview(entry)}>復習を記録</button>
-                      : <button className="secondary-button" onClick={() => { setMaterialTrack(entry.material.id, "exercise"); setMaterialRound(entry.material.id, entry.round, "exercise"); setSelected(entry.material.id); setView("home"); }}>対象を開く</button>}
-                  </article>
-                );
-              })}
-              {reviewEntries.length === 0 && <div className="empty-state"><strong>復習予定はありません</strong><p>解決済みの問題の右下にある「↻」を押すと、復習予定へ追加できます。</p></div>}
-            </div>
-          </section>
-        )}
-
         {view === "history" && (
           <section className="view-panel">
             <div className="view-heading"><div><p className="eyebrow">STUDY LOG</p><h2>学習記録</h2><p>これまでの積み重ねを状態別に確認できます</p></div></div>
@@ -1864,7 +1702,6 @@ export default function Home() {
                 const count = totalProblems.filter((problem) => problem.status === status).length;
                 return <article key={status}><i className={`dot ${status}`} /><span>{statusLabel[status]}</span><strong>{count}<small>件</small></strong></article>;
               })}
-              <article><i className="dot review" /><span>復習可能</span><strong>{dueReviews.length}<small>件</small></strong></article>
             </div>
             <article className="heat-card history-heat">
               <div className="card-heading"><div><p>学習の足あと</p><h3>直近7週間</h3></div><span>今日 {todayCount}件</span></div>
@@ -1909,13 +1746,12 @@ export default function Home() {
                 <article><div><strong>本日の初回学習</strong><small>1日につき1回</small></div><b>＋5 pt</b></article>
                 <article><div><strong>新しい単位に着手</strong><small>1単位・1周につき初回</small></div><b>＋1 pt</b></article>
                 <article><div><strong>学習単位を完了</strong><small>演習の解決・読書の読了</small></div><b>＋2 pt</b></article>
-                <article><div><strong>復習を記録</strong><small>予定後24時間以内はさらに＋2 pt</small></div><b>＋3 pt</b></article>
                 <article><div><strong>章を完了</strong><small>章の1周ごと</small></div><b>＋15 pt</b></article>
                 <article><div><strong>教材を100%完了</strong><small>教材の1周ごと</small></div><b>＋50 pt</b></article>
                 <article><div><strong>連続学習</strong><small>3・7・14・30日など</small></div><b>＋3〜300 pt</b></article>
                 <article><div><strong>学習再開</strong><small>3〜6日＋5・7〜13日＋10・14日以上＋20</small></div><b>＋5〜20 pt</b></article>
-                <article><div><strong>日次目標を完了</strong><small>学習3・完了2・復習1</small></div><b>＋10 pt</b></article>
-                <article><div><strong>週間達成目標を完了</strong><small>学習1・完了3・復習2の合計100</small></div><b>＋50 pt</b></article>
+                <article><div><strong>日次目標を完了</strong><small>学習3・完了2</small></div><b>＋10 pt</b></article>
+                <article><div><strong>週間達成目標を完了</strong><small>学習1・完了3の合計100</small></div><b>＋50 pt</b></article>
                 <article><div><strong>時限達成報酬を受領</strong><small>5単位の初回完了後、3時間後から24時間</small></div><b>＋15 pt</b></article>
               </div>
             </section>
@@ -1952,7 +1788,7 @@ export default function Home() {
                 const round = material ? Math.min(getRoundCount(material, examMode), Math.max(1, exam.round ?? getActiveRound(material, examMode))) : 1;
                 const problems = material?.chapters.flatMap((chapter) => getChapterItems(chapter, examMode).map((problem) => getProblemState(problem, round))) ?? [];
                 const solvedCount = problems.filter((problem) => problem.status === "solved" || problem.status === "with-answer").length;
-                const reviewCount = problems.filter((problem) => Boolean(problem.reviewDueAt) && new Date(problem.reviewDueAt!).getTime() <= clock).length;
+                const completionPercent = problems.length ? Math.round((solvedCount / problems.length) * 100) : 0;
                 const days = exam.date ? Math.ceil((new Date(`${exam.date}T12:00:00`).getTime() - now.getTime()) / 86400000) : null;
                 return (
                   <article className="exam-card" key={exam.id}>
@@ -1968,8 +1804,8 @@ export default function Home() {
                       <p>{exam.name.trim() || "試験名を設定してください"}</p>
                       <strong>{days === null ? "—" : days >= 0 ? `あと${days}日` : `${Math.abs(days)}日前`}</strong>
                       <span>{material ? `${material.title}・${getTrackLabel(examMode)}・第${round}周` : "対象教材なし"}</span>
-                      <div className="exam-stats"><div><b>{solvedCount}</b><small>完了済み</small></div><div><b>{Math.max(0, problems.length - solvedCount)}</b><small>未完了</small></div><div><b>{reviewCount}</b><small>復習可能</small></div></div>
-                      <div className="goal-track"><i style={{ width: `${problems.length ? Math.round((solvedCount / problems.length) * 100) : 0}%` }} /></div>
+                      <div className="exam-stats"><div><b>{solvedCount}</b><small>完了済み</small></div><div><b>{Math.max(0, problems.length - solvedCount)}</b><small>未完了</small></div><div><b>{completionPercent}%</b><small>進捗</small></div></div>
+                      <div className="goal-track"><i style={{ width: `${completionPercent}%` }} /></div>
                       {material && <button className="primary-button" onClick={() => { setMaterialTrack(material.id, examMode); setMaterialRound(material.id, round, examMode); setSelected(material.id); setView("home"); }}>対象教材を開く</button>}
                     </div>
                   </article>
@@ -1991,7 +1827,7 @@ export default function Home() {
               <h2>積み重ねが、<br />見える形になってきました。</h2>
               <div className="mini-stats">
                 <span><b>{solved}</b> 完了</span>
-                <span><b>{review}</b> 復習可能</span>
+                <span><b>{todayCount}</b> 今日</span>
                 <span><b>{activeMaterials.length}</b> 教材</span>
               </div>
             </div>
@@ -2022,21 +1858,16 @@ export default function Home() {
         </section>
 
         <section className="time-overview" aria-label="期限と達成状況">
-          <article className="time-card">
-            <header><span>復習予定</span><strong>{dueReviews.length}<small>件</small></strong></header>
-            <p>{dueReviews.length > 0 ? "現在復習できます" : nextReview ? `次の予定まで ${formatRemaining(nextReview.dueTime - clock)}` : "予定はありません"}</p>
-            <button className="secondary-button" onClick={() => setView("review")}>復習予定を確認</button>
-          </article>
           <article className={`time-card ${dailyCompleted ? "complete" : ""}`}>
-            <header><span>日次目標</span><strong>{dailyCompletedCount}<small> / 3項目</small></strong></header>
-            <div className="time-progress"><i style={{ width: `${Math.round((dailyCompletedCount / 3) * 100)}%` }} /></div>
-            <p>学習 {Math.min(dailyProgress.study, dailyTargets.study)}/{dailyTargets.study}・完了 {Math.min(dailyProgress.solve, dailyTargets.solve)}/{dailyTargets.solve}・復習 {Math.min(dailyProgress.review, dailyTargets.review)}/{dailyTargets.review}</p>
-            <em>{dailyCompleted ? "完了済み・＋10 pt" : "3項目の完了で＋10 pt"}</em>
+            <header><span>日次目標</span><strong>{dailyCompletedCount}<small> / 2項目</small></strong></header>
+            <div className="time-progress"><i style={{ width: `${Math.round((dailyCompletedCount / 2) * 100)}%` }} /></div>
+            <p>学習 {Math.min(dailyProgress.study, dailyTargets.study)}/{dailyTargets.study}・完了 {Math.min(dailyProgress.solve, dailyTargets.solve)}/{dailyTargets.solve}</p>
+            <em>{dailyCompleted ? "完了済み・＋10 pt" : "2項目の完了で＋10 pt"}</em>
           </article>
           <article className={`time-card ${weeklyCompleted ? "complete" : ""}`}>
             <header><span>週間達成目標</span><strong>{Math.min(weeklyScore, weeklyTarget)}<small> / {weeklyTarget}</small></strong></header>
             <div className="time-progress"><i style={{ width: `${Math.min(100, Math.round((weeklyScore / weeklyTarget) * 100))}%` }} /></div>
-            <p>学習＋1・完了＋3・復習＋2<br />締切まで {formatRemaining(weekEnd.getTime() - clock)}</p>
+            <p>学習＋1・完了＋3<br />締切まで {formatRemaining(weekEnd.getTime() - clock)}</p>
             <em>{weeklyCompleted ? "完了済み・＋50 pt" : "完了時に＋50 pt"}</em>
           </article>
           <article className={`time-card ${readyTimedRewards.length > 0 ? "complete" : ""}`}>
@@ -2081,17 +1912,15 @@ export default function Home() {
           <div className="problem-toolbar">
             <div>
               <h3>章ごとの{getTrackLabel(currentMode)}</h3>
-              <p>{getStudyUnit(current, currentMode)}番号を押すと進捗が切り替わります。{currentMode === "exercise" ? "解決後、右下の「↻」で復習予定への追加・解除ができます。" : "読書の進み具合を記録できます。"}</p>
+              <p>{getStudyUnit(current, currentMode)}番号を押すと進捗が切り替わります。{currentMode === "reading" && "読書の進み具合を記録できます。"}</p>
             </div>
             <select aria-label="状態で絞り込む" value={visibleFilter} onChange={(e) => setFilter(e.target.value as ProblemFilter)}>
               <option value="all">すべての状態</option>
               {getStatusOrder(current, currentMode).map((status) => <option value={status} key={status}>{getStatusLabel(current, status, currentMode)}</option>)}
-              {currentMode === "exercise" && <option value="review-due">復習可能</option>}
             </select>
           </div>
           <div className="legend">
             {getStatusOrder(current, currentMode).map((status) => <span key={status}><i className={`dot ${status}`} />{getStatusLabel(current, status, currentMode)}</span>)}
-            {currentMode === "exercise" && <span><i className="dot review" />復習予定（解決後に任意で追加）</span>}
           </div>
 
           <div className="chapters">
@@ -2111,28 +1940,16 @@ export default function Home() {
                     </div>
                   </div>
                   <div className="problem-grid">
-                    {chapter.problems.map((problem) => {
-                      const reviewTime = currentMode === "exercise" && problem.reviewDueAt ? new Date(problem.reviewDueAt).getTime() : null;
-                      const reviewState = reviewTime === null ? null : reviewTime <= clock ? "due" : "scheduled";
-                      const reviewText = reviewState === "due" ? "復習可能" : reviewState === "scheduled" ? "復習予定あり" : "";
-                      return (
-                        <div className={`problem-wrap ${reviewState ? `review-${reviewState}` : ""}`} key={problem.id}>
+                    {chapter.problems.map((problem) => (
+                        <div className="problem-wrap" key={problem.id}>
                           <button
                             className={`problem ${problem.status}`}
-                            title={`${problem.id}${getStudyUnit(current, currentMode)}・${getStatusLabel(current, problem.status, currentMode)}${reviewText ? `・${reviewText}` : ""}`}
-                            aria-label={`${problem.id}${getStudyUnit(current, currentMode)}、${getStatusLabel(current, problem.status, currentMode)}${reviewText ? `、${reviewText}` : ""}。押すと次の進捗へ`}
+                            title={`${problem.id}${getStudyUnit(current, currentMode)}・${getStatusLabel(current, problem.status, currentMode)}`}
+                            aria-label={`${problem.id}${getStudyUnit(current, currentMode)}、${getStatusLabel(current, problem.status, currentMode)}。押すと次の進捗へ`}
                             onClick={() => cycleProblem(chapter.id, problem.id)}
                           >
                             {problem.id}
                           </button>
-                          {currentMode === "exercise" && isSolvedStatus(problem.status) && (
-                            <button
-                              className={`problem-review ${reviewState ?? "available"}`}
-                              title={reviewState ? `${problem.id}${getStudyUnit(current, currentMode)}を復習予定から外す` : `${problem.id}${getStudyUnit(current, currentMode)}を復習予定に追加`}
-                              aria-label={reviewState ? `${problem.id}${getStudyUnit(current, currentMode)}を復習予定から外す` : `${problem.id}${getStudyUnit(current, currentMode)}を復習予定に追加`}
-                              onClick={() => toggleProblemReview(chapter.id, problem.id)}
-                            >↻</button>
-                          )}
                           {problem.status !== "todo" && (
                             <button
                               className="problem-reset"
@@ -2142,8 +1959,7 @@ export default function Home() {
                             >×</button>
                           )}
                         </div>
-                      );
-                    })}
+                    ))}
                     {chapter.problems.length === 0 && <p className="empty">この状態の学習単位はありません。</p>}
                   </div>
                 </article>
@@ -2244,7 +2060,7 @@ export default function Home() {
                   const enabled = event.target.checked;
                   setNewExerciseEnabled(enabled);
                   if (enabled && chapterDrafts.every((chapter) => chapter.exerciseCount === 0)) setChapterDrafts((items) => items.map((item, index) => index === 0 ? { ...item, exerciseCount: 1 } : item));
-                }} /><span><strong>演習</strong><small>問題の解決と復習予定を記録</small></span></label>
+                }} /><span><strong>演習</strong><small>問題の解決を記録</small></span></label>
                 <label>単位<select disabled={!newExerciseEnabled} value={newExerciseUnit} onChange={(event) => setNewExerciseUnit(event.target.value as StudyUnit)}><option>問</option><option>項目</option></select></label>
               </div>
             </fieldset>
