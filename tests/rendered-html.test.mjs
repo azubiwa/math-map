@@ -12,8 +12,8 @@ test("exports Math Map", async () => {
   assert.match(html, /時限達成報酬/);
   assert.match(html, /クラウド同期|端末保存/);
   assert.match(html, /class="overall-points"/);
-  assert.match(html, /解決状況と復習予定は別々に記録されます/);
-  assert.match(html, /復習予定（進捗と併記）/);
+  assert.match(html, /右下の「↻」で復習予定への追加・解除ができます/);
+  assert.match(html, /復習予定（解決後に任意で追加）/);
   assert.doesNotMatch(html, /復習待ち/);
   assert.doesNotMatch(html, /週間ボス|宝箱|ミッション|熟成/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
@@ -28,6 +28,15 @@ test("supports reading and exercise tracks in one material", async () => {
   assert.match(source, /exerciseEnabled/);
   assert.match(source, /className="track-switch"/);
   assert.match(source, /currentMode === "exercise" && <option value="review-due">復習可能<\/option>/);
+});
+
+test("keeps solving and review scheduling independent", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /const toggleProblemReview/);
+  assert.match(source, /reviewScheduled: true/);
+  assert.match(source, /reviewScheduled: false/);
+  assert.match(source, /className={`problem-review \${reviewState \?\? "available"}`}/);
+  assert.doesNotMatch(source, /nextStatus === "solved" && currentMode === "exercise"/);
 });
 
 test("provides milestone categories for different study records", async () => {
