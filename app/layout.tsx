@@ -8,7 +8,12 @@ export const metadata: Metadata = {
   metadataBase: base,
   title: "Math Map｜数学学習の進捗マップ",
   description: "本・授業・章・問題ごとに、数学の学習進捗を記録して見える化する個人用トラッカー。",
-  icons: { icon: new URL("favicon.svg", base), shortcut: new URL("favicon.svg", base) },
+  icons: {
+    icon: new URL("favicon.svg", base),
+    shortcut: new URL("favicon.svg", base),
+    apple: { url: new URL("apple-touch-icon.png", base), sizes: "180x180", type: "image/png" },
+  },
+  manifest: new URL("manifest.webmanifest", base),
   openGraph: {
     title: "MATH MAP",
     description: "数学の学びを、地図にする。",
