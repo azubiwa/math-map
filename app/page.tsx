@@ -69,6 +69,8 @@ const weeklyTarget = 100;
 const timedRewardRequiredSolves = 5;
 const timedRewardDelayMs = 3 * 60 * 60 * 1000;
 const timedRewardWindowMs = 24 * 60 * 60 * 1000;
+const exerciseCompletionPoints = 2;
+const readingCompletionPoints = 5;
 
 const streakBonuses: Record<number, number> = {
   3: 3,
@@ -591,6 +593,12 @@ function validPointAwards(value: unknown): PointAward[] | null {
   });
 }
 
+function applyCurrentPointWeights(awards: PointAward[]) {
+  return awards.map((award) => award.key.startsWith("solve:") && award.label.endsWith("を読了")
+    ? { ...award, points: readingCompletionPoints }
+    : award);
+}
+
 function migratePointAwards(materials: Material[], pointDays: string[], legacyPoints = 0) {
   const awards: PointAward[] = pointDays.map((day) => ({
     key: `daily:${day}`,
@@ -611,7 +619,7 @@ function migratePointAwards(materials: Material[], pointDays: string[], legacyPo
               awards.push({ key: `start:${awardId}`, points: 1, label: `新しい${getStudyUnit(material, mode)}に着手`, earnedOn });
             }
             if (isSolvedStatus(state.status)) {
-              awards.push({ key: `solve:${awardId}`, points: 2, label: mode === "reading" ? `${getStudyUnit(material, mode)}を読了` : "問題を解決", earnedOn });
+              awards.push({ key: `solve:${awardId}`, points: mode === "reading" ? readingCompletionPoints : exerciseCompletionPoints, label: mode === "reading" ? `${getStudyUnit(material, mode)}を読了` : "問題を解決", earnedOn });
             }
           });
           if (getChapterItems(chapter, mode).length > 0 && pct([chapter], round, mode) === 100) {
@@ -678,7 +686,7 @@ export default function Home() {
   const skipNextCloudPush = useRef(false);
   const lastSyncedAtRef = useRef("");
   const latestSnapshotRef = useRef<StudySnapshot>({
-    version: 12,
+    version: 13,
     exportedAt: new Date().toISOString(),
     materials: seed,
     activity: {},
@@ -696,7 +704,7 @@ export default function Home() {
     setGoals(snapshot.goals);
     setExams(snapshot.exams);
     setPointDays(snapshot.pointDays);
-    setPointAwards(snapshot.pointAwards);
+    setPointAwards(applyCurrentPointWeights(snapshot.pointAwards));
     setStudyEvents(snapshot.studyEvents);
     setTimedRewardState(snapshot.timedRewardState);
     setSelected(snapshot.materials[0].id);
@@ -705,7 +713,7 @@ export default function Home() {
 
   useEffect(() => {
     latestSnapshotRef.current = {
-      version: 12,
+      version: 13,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -768,7 +776,7 @@ export default function Home() {
         try { restoredPointAwards = validPointAwards(JSON.parse(savedPointAwards)); } catch {}
       }
       const hasSavedProgress = Boolean(saved || savedActivity || savedPointDays || savedPoints);
-      setPointAwards(restoredPointAwards ?? (hasSavedProgress ? migratePointAwards(restoredMaterials, restoredPointDays, Math.max(0, Number(savedPoints) || 0)) : []));
+      setPointAwards(applyCurrentPointWeights(restoredPointAwards ?? (hasSavedProgress ? migratePointAwards(restoredMaterials, restoredPointDays, Math.max(0, Number(savedPoints) || 0)) : [])));
       let restoredStudyEvents: StudyEvent[] | null = null;
       if (savedStudyEvents) {
         try { restoredStudyEvents = validStudyEvents(JSON.parse(savedStudyEvents)); } catch {}
@@ -1167,7 +1175,7 @@ export default function Home() {
       awards.push({ key: `start:${awardId}`, points: 1, label: `新しい${getStudyUnit(current, currentMode)}に着手`, earnedOn: today });
     }
     if (nextStatus === "solved") {
-      awards.push({ key: `solve:${awardId}`, points: 2, label: currentMode === "reading" ? `${getStudyUnit(current, currentMode)}を読了` : "問題を解決", earnedOn: today });
+      awards.push({ key: `solve:${awardId}`, points: currentMode === "reading" ? readingCompletionPoints : exerciseCompletionPoints, label: currentMode === "reading" ? `${getStudyUnit(current, currentMode)}を読了` : "問題を解決", earnedOn: today });
       events.push({ id: `solve:${today}:${awardId}`, type: "solve", date: today, problemKey: awardId });
     }
     const targetChapterItems = getChapterItems(targetChapter, currentMode);
@@ -1518,7 +1526,7 @@ export default function Home() {
 
   const exportData = () => {
     const backup = {
-      version: 12,
+      version: 13,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -1553,7 +1561,7 @@ export default function Home() {
       const restoredPointAwards = !Array.isArray(parsed) ? validPointAwards(parsed.pointAwards) : null;
       const legacyPoints = !Array.isArray(parsed) && typeof parsed.studyPoints === "number" ? Math.max(0, parsed.studyPoints) : 0;
       setPointDays(restoredPointDays);
-      setPointAwards(restoredPointAwards ?? migratePointAwards(restoredMaterials, restoredPointDays, legacyPoints));
+      setPointAwards(applyCurrentPointWeights(restoredPointAwards ?? migratePointAwards(restoredMaterials, restoredPointDays, legacyPoints)));
       const restoredStudyEvents = !Array.isArray(parsed) ? validStudyEvents(parsed.studyEvents) : null;
       setStudyEvents(restoredStudyEvents ?? migrateStudyEvents(restoredActivity));
       const restoredTimedRewards = !Array.isArray(parsed) ? validTimedRewardState(parsed.timedRewardState) : null;
@@ -1745,10 +1753,11 @@ export default function Home() {
               <div className="point-rules">
                 <article><div><strong>本日の初回学習</strong><small>1日につき1回</small></div><b>＋5 pt</b></article>
                 <article><div><strong>新しい単位に着手</strong><small>1単位・1周につき初回</small></div><b>＋1 pt</b></article>
-                <article><div><strong>学習単位を完了</strong><small>演習の解決・読書の読了</small></div><b>＋2 pt</b></article>
+                <article><div><strong>問題を解決</strong><small>1問・1周につき初回（自力・解答参照）</small></div><b>＋2 pt</b></article>
+                <article><div><strong>読書単位を読了</strong><small>1単位・1周につき初回</small></div><b>＋5 pt</b></article>
                 <article><div><strong>章を完了</strong><small>章の1周ごと</small></div><b>＋15 pt</b></article>
                 <article><div><strong>教材を100%完了</strong><small>教材の1周ごと</small></div><b>＋50 pt</b></article>
-                <article><div><strong>連続学習</strong><small>3・7・14・30日など</small></div><b>＋3〜300 pt</b></article>
+                <article><div><strong>連続学習</strong><small>3日＋3・7日＋10・14日＋25・30日＋60・60日＋150・100日＋300</small></div><b>＋3〜300 pt</b></article>
                 <article><div><strong>学習再開</strong><small>3〜6日＋5・7〜13日＋10・14日以上＋20</small></div><b>＋5〜20 pt</b></article>
                 <article><div><strong>日次目標を完了</strong><small>学習3・完了2</small></div><b>＋10 pt</b></article>
                 <article><div><strong>週間達成目標を完了</strong><small>学習1・完了3の合計100</small></div><b>＋50 pt</b></article>
