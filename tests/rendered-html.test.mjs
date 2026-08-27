@@ -6,7 +6,7 @@ test("exports Math Map", async () => {
   const html = await readFile(new URL("../out/index.html", import.meta.url), "utf8");
   assert.match(html, /<title>Math Map｜数学学習の進捗マップ<\/title>/i);
   assert.match(html, /MATH MAP/);
-  assert.match(html, /学習の足あと/);
+  assert.match(html, /学習のあしあと/);
   assert.match(html, /日次目標/);
   assert.match(html, /週間達成目標/);
   assert.match(html, /時限達成報酬/);
@@ -40,4 +40,17 @@ test("provides milestone categories for different study records", async () => {
   }
   assert.match(source, /milestone-levels/);
   assert.match(source, /段階を達成/);
+});
+
+test("shows and documents every point award rule", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const docs = await readFile(new URL("../docs/point-rules.md", import.meta.url), "utf8");
+  for (const label of ["本日の初回学習", "問題を解決", "読書単位を読了", "章を完了", "教材を100%完了", "連続学習", "学習再開", "日次目標を完了", "週間達成目標を完了", "時限達成報酬を受領"]) {
+    assert.match(source, new RegExp(label));
+    assert.match(docs, new RegExp(label));
+  }
+  assert.match(source, /readingCompletionPoints = 5/);
+  assert.match(source, /exerciseCompletionPoints = 2/);
+  assert.match(source, /applyCurrentPointWeights/);
+  assert.match(docs, /読書単位の読了は \*\*\+5 pt\*\*、問題の解決は \*\*\+2 pt\*\*/);
 });
