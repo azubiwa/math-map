@@ -48,7 +48,11 @@ test("removes review scheduling from data and interface", async () => {
 });
 
 test("provides milestone categories for different study records", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const [pageSource, milestoneSource] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/goals/MilestonesSection.tsx", import.meta.url), "utf8"),
+  ]);
+  const source = `${pageSource}\n${milestoneSource}`;
   for (const label of ["完了単位", "演習の解決", "読書の完了", "累計学習日", "連続学習", "章の完了", "周回の完了", "累計ポイント"]) {
     assert.match(source, new RegExp(label));
   }
@@ -57,7 +61,11 @@ test("provides milestone categories for different study records", async () => {
 });
 
 test("shows and documents every point award rule", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const [pageSource, pointRulesSource] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/goals/PointRulesSection.tsx", import.meta.url), "utf8"),
+  ]);
+  const source = `${pageSource}\n${pointRulesSource}`;
   const docs = await readFile(new URL("../docs/point-rules.md", import.meta.url), "utf8");
   for (const label of ["本日の初回学習", "問題を解決", "読書単位を読了", "章を完了", "教材を100%完了", "連続学習", "学習再開", "日次目標を完了", "週間達成目標を完了", "時限達成報酬を受領"]) {
     assert.match(source, new RegExp(label));
@@ -67,4 +75,15 @@ test("shows and documents every point award rule", async () => {
   assert.match(source, /exerciseCompletionPoints = 2/);
   assert.match(source, /applyCurrentPointWeights/);
   assert.match(docs, /読書単位の読了は \*\*\+5 pt\*\*、問題の解決は \*\*\+2 pt\*\*/);
+});
+
+test("splits the goals view into item components", async () => {
+  const [pageSource, goalsViewSource] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/goals/GoalsView.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(pageSource, /<GoalsView/);
+  for (const component of ["StudyGoalsCard", "StreakCard", "PointsCard", "PointHistorySection", "PointRulesSection", "MilestonesSection"]) {
+    assert.match(goalsViewSource, new RegExp(`<${component}`));
+  }
 });

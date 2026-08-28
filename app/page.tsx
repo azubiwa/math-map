@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
+import { GoalsView } from "@/app/components/goals/GoalsView";
+import type { PointChartRange } from "@/app/components/goals/PointHistorySection";
 import { cloudSyncConfigured, supabase } from "@/lib/supabase";
 
 type Status = "todo" | "trying" | "solved" | "with-answer";
@@ -45,7 +47,6 @@ type Material = {
 };
 type View = "home" | "materials" | "history" | "goals" | "exam";
 type ProblemFilter = Status | "all";
-type PointChartRange = "30" | "90" | "all";
 type ChapterDraft = { id?: string; title: string; exerciseCount: number; readingCount: number };
 type Goals = { weekly: number; monthly: number };
 type ExamSettings = { id: string; enabled: boolean; name: string; date: string; materialId: string; round?: number };
@@ -1139,49 +1140,6 @@ export default function Home() {
   const exerciseSolved = allExerciseRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
   const readingCompleted = allReadingRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
-  const pointChart = useMemo(() => {
-    const chartNow = new Date(clockTime);
-    const byDate = new Map<string, number>();
-    pointAwards.forEach((award) => {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(award.earnedOn)) {
-        byDate.set(award.earnedOn, (byDate.get(award.earnedOn) ?? 0) + award.points);
-      }
-    });
-
-    const dates = [...byDate.keys()].sort();
-    const rangeDays = pointChartRange === "all" ? null : Number(pointChartRange);
-    const earliest = dates[0] ? new Date(`${dates[0]}T12:00:00`) : chartNow;
-    const start = new Date(rangeDays ? chartNow.getTime() - (rangeDays - 1) * 86400000 : earliest.getTime());
-    start.setHours(12, 0, 0, 0);
-    const end = new Date(chartNow);
-    end.setHours(12, 0, 0, 0);
-    const naturalDayCount = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
-    if (naturalDayCount < 2) start.setDate(start.getDate() - (2 - naturalDayCount));
-    const startKey = localDateKey(start);
-    const beforeRange = dates.filter((date) => date < startKey).reduce((sum, date) => sum + (byDate.get(date) ?? 0), 0);
-    const dayCount = Math.max(2, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
-    const points = Array.from({ length: dayCount }, (_, index) => {
-      const date = new Date(start);
-      date.setDate(start.getDate() + index);
-      const key = localDateKey(date);
-      const gained = byDate.get(key) ?? 0;
-      const total = beforeRange + dates.filter((dateKey) => dateKey >= startKey && dateKey <= key).reduce((sum, dateKey) => sum + (byDate.get(dateKey) ?? 0), 0);
-      return { key, date, total, gained };
-    });
-    const max = Math.max(studyPoints, ...points.map((point) => point.total), 1);
-    const width = 720;
-    const height = 220;
-    const padding = { top: 20, right: 16, bottom: 31, left: 48 };
-    const innerWidth = width - padding.left - padding.right;
-    const innerHeight = height - padding.top - padding.bottom;
-    const plotPoints = points.map((point, index) => ({
-      ...point,
-      x: padding.left + (index / (points.length - 1)) * innerWidth,
-      y: padding.top + innerHeight - (point.total / max) * innerHeight,
-    }));
-    const path = plotPoints.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
-    return { height, width, padding, innerHeight, innerWidth, max, path, points: plotPoints, start, end };
-  }, [clockTime, pointAwards, pointChartRange, studyPoints]);
   const overall = activeMaterials.length
     ? Math.round(activeMaterials.reduce((sum, material) => sum + materialPct(material), 0) / activeMaterials.length)
     : 0;
@@ -2008,104 +1966,21 @@ export default function Home() {
         )}
 
         {view === "goals" && (
-          <section className="view-panel">
-            <div className="view-heading"><div><p className="eyebrow">GOALS & MILESTONES</p><h2>目標・実績</h2><p>無理のない目標を決めて、積み重ねを確認できます</p></div></div>
-            <div className="goal-layout">
-              <article className="settings-card">
-                <p className="eyebrow">STUDY GOALS</p>
-                <h3>学習目標</h3>
-                <div className="goal-inputs">
-                  <label>週間目標<div><input type="number" min="1" max="999" value={goals.weekly} onChange={(event) => setGoals((value) => ({ ...value, weekly: Math.max(1, Number(event.target.value) || 1) }))} /><span>件</span></div></label>
-                  <label>月間目標<div><input type="number" min="1" max="9999" value={goals.monthly} onChange={(event) => setGoals((value) => ({ ...value, monthly: Math.max(1, Number(event.target.value) || 1) }))} /><span>件</span></div></label>
-                </div>
-                <div className="goal-detail">
-                  <div><span>今週</span><strong>{weekCount} / {goals.weekly}件</strong></div>
-                  <div className="goal-track"><i style={{ width: `${goalPercent(weekCount, goals.weekly)}%` }} /></div>
-                  <div><span>今月</span><strong>{monthCount} / {goals.monthly}件</strong></div>
-                  <div className="goal-track"><i style={{ width: `${goalPercent(monthCount, goals.monthly)}%` }} /></div>
-                </div>
-              </article>
-              <article className="streak-card">
-                <p>現在の連続学習</p>
-                <strong>{streak}<small>日</small></strong>
-                <span>{streak > 0 ? "本日の学習状況を記録済み" : "1件記録すると継続日数が始まります"}</span>
-              </article>
-              <article className="point-card">
-                <p>累計ポイント</p>
-                <strong>{studyPoints}<small> pt</small></strong>
-                <span>学習記録と目標達成に応じて加算</span>
-              </article>
-            </div>
-            <section className="point-chart-section" aria-labelledby="point-chart-title">
-              <div className="section-heading">
-                <div><p className="eyebrow">POINT HISTORY</p><h3 id="point-chart-title">累計ポイントの推移</h3></div>
-                <div className="point-chart-range" aria-label="表示期間">
-                  {(["30", "90", "all"] as PointChartRange[]).map((range) => (
-                    <button key={range} className={pointChartRange === range ? "active" : ""} onClick={() => setPointChartRange(range)}>
-                      {range === "all" ? "すべて" : `${range}日`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <article className="point-chart-card">
-                <div className="point-chart-summary">
-                  <div><strong>{studyPoints}<small> pt</small></strong><span>現在の累計</span></div>
-                  <p>{pointChart.start.getFullYear()}年{pointChart.start.getMonth() + 1}月{pointChart.start.getDate()}日 〜 {pointChart.end.getMonth() + 1}月{pointChart.end.getDate()}日</p>
-                </div>
-                <div className="point-chart-scroll">
-                  <svg className="point-chart" viewBox={`0 0 ${pointChart.width} ${pointChart.height}`} role="img" aria-label={`累計ポイント ${studyPoints}ポイントの推移グラフ`}>
-                    {[0, 1, 2, 3, 4].map((step) => {
-                      const value = Math.round(pointChart.max * (1 - step / 4));
-                      const y = pointChart.padding.top + pointChart.innerHeight * (step / 4);
-                      return <g key={step}><line x1={pointChart.padding.left} x2={pointChart.width - pointChart.padding.right} y1={y} y2={y} /><text x={pointChart.padding.left - 9} y={y + 4}>{value}</text></g>;
-                    })}
-                    <path className="point-chart-area" d={`${pointChart.path} L${pointChart.points.at(-1)?.x},${pointChart.padding.top + pointChart.innerHeight} L${pointChart.points[0]?.x},${pointChart.padding.top + pointChart.innerHeight} Z`} />
-                    <path className="point-chart-line" d={pointChart.path} />
-                    {pointChart.points.filter((point) => point.gained > 0).map((point) => <circle key={point.key} cx={point.x} cy={point.y} r="4"><title>{`${formatHeatDate(point.date)}：+${point.gained} pt、累計 ${point.total} pt`}</title></circle>)}
-                    <text className="point-chart-date" x={pointChart.padding.left} y={pointChart.height - 8}>{formatHeatDate(pointChart.start)}</text>
-                    <text className="point-chart-date" x={pointChart.width - pointChart.padding.right} y={pointChart.height - 8} textAnchor="end">{formatHeatDate(pointChart.end)}</text>
-                  </svg>
-                </div>
-                <p className="point-chart-note">点に触れると、その日に獲得したポイントと累計を確認できます。</p>
-              </article>
-            </section>
-            <section className="point-rules-section">
-              <div className="section-heading"><div><p className="eyebrow">POINT RULES</p><h3>ポイントの加算条件</h3></div><span>同じ記録からの重複加算はありません</span></div>
-              <div className="point-rules">
-                <article><div><strong>本日の初回学習</strong><small>1日につき1回</small></div><b>＋5 pt</b></article>
-                <article><div><strong>新しい単位に着手</strong><small>1単位・1周につき初回</small></div><b>＋1 pt</b></article>
-                <article><div><strong>問題を解決</strong><small>1問・1周につき初回（自力・解答参照）</small></div><b>＋2 pt</b></article>
-                <article><div><strong>読書単位を読了</strong><small>1単位・1周につき初回</small></div><b>＋5 pt</b></article>
-                <article><div><strong>章を完了</strong><small>章の1周ごと</small></div><b>＋15 pt</b></article>
-                <article><div><strong>教材を100%完了</strong><small>教材の1周ごと</small></div><b>＋50 pt</b></article>
-                <article><div><strong>連続学習</strong><small>3日＋3・7日＋10・14日＋25・30日＋60・60日＋150・100日＋300</small></div><b>＋3〜300 pt</b></article>
-                <article><div><strong>学習再開</strong><small>3〜6日＋5・7〜13日＋10・14日以上＋20</small></div><b>＋5〜20 pt</b></article>
-                <article><div><strong>日次目標を完了</strong><small>学習3・完了2</small></div><b>＋10 pt</b></article>
-                <article><div><strong>週間達成目標を完了</strong><small>学習1・完了3の合計100</small></div><b>＋50 pt</b></article>
-                <article><div><strong>時限達成報酬を受領</strong><small>5単位の初回完了後、3時間後から24時間</small></div><b>＋15 pt</b></article>
-              </div>
-            </section>
-            <section className="milestone-section">
-              <div className="section-heading"><div><p className="eyebrow">MILESTONES</p><h3>マイルストーン</h3></div><span>{achievedMilestoneCount} / {milestoneTargetCount}段階を達成</span></div>
-              <div className="milestone-grid">
-                {milestoneGroups.map((group) => {
-                  const achieved = group.steps.filter((step) => group.value >= step).length;
-                  const next = group.steps.find((step) => group.value < step);
-                  const complete = next === undefined;
-                  return (
-                    <article className={`milestone-kind ${achieved > 0 ? "has-achievement" : ""} ${complete ? "unlocked" : ""}`} key={group.id}>
-                      <div className="milestone-kind-head"><span>{complete ? "✓" : achieved}</span><div><strong>{group.title}</strong><small>{group.description}</small></div></div>
-                      <div className="milestone-value"><b>{group.value}</b><small>{group.unit}</small></div>
-                      <div className="milestone-levels" aria-label={`${group.title}の達成段階`}>
-                        {group.steps.map((step) => <span className={group.value >= step ? "achieved" : ""} key={step}>{step}</span>)}
-                      </div>
-                      <p>{next === undefined ? "すべての段階を達成" : `${next}${group.unit}まであと${next - group.value}${group.unit}`}</p>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-          </section>
+          <GoalsView
+            goals={goals}
+            weekCount={weekCount}
+            monthCount={monthCount}
+            streak={streak}
+            studyPoints={studyPoints}
+            pointAwards={pointAwards}
+            clockTime={clockTime}
+            pointChartRange={pointChartRange}
+            milestoneGroups={milestoneGroups}
+            achievedMilestoneCount={achievedMilestoneCount}
+            milestoneTargetCount={milestoneTargetCount}
+            onGoalsChange={setGoals}
+            onPointChartRangeChange={setPointChartRange}
+          />
         )}
 
         {view === "exam" && (
