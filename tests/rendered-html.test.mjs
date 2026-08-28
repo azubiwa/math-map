@@ -27,6 +27,20 @@ test("supports reading and exercise tracks in one material", async () => {
   assert.match(source, /className="track-switch"/);
 });
 
+test("shows a finish forecast and lets each material set a destination and deadline", async () => {
+  const html = await readFile(new URL("../out/index.html", import.meta.url), "utf8");
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  for (const label of ["必要ペース", "あなたの最近のペース", "このペースなら", "順調です"]) {
+    assert.match(html, new RegExp(label));
+  }
+  assert.match(source, /type FinishGoal/);
+  assert.match(source, /finishGoalChapterId/);
+  assert.match(source, /どこまで、いつまでに？/);
+  assert.match(source, /この教材の最後まで（完走）/);
+  assert.match(source, /章のどこまで/);
+  assert.match(source, /完走目標を設定/);
+});
+
 test("removes review scheduling from data and interface", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /return \{ id: problem\.id, \.\.\.baseState, rounds \};/);
