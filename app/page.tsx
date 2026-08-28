@@ -37,6 +37,7 @@ type Material = {
 };
 type View = "home" | "materials" | "history" | "goals" | "exam";
 type ProblemFilter = Status | "all";
+type PointChartRange = "30" | "90" | "all";
 type ChapterDraft = { id?: string; title: string; exerciseCount: number; readingCount: number };
 type Goals = { weekly: number; monthly: number };
 type ExamSettings = { id: string; enabled: boolean; name: string; date: string; materialId: string; round?: number };
@@ -653,6 +654,7 @@ export default function Home() {
   const [filter, setFilter] = useState<ProblemFilter>("all");
   const [view, setView] = useState<View>("home");
   const [dark, setDark] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
@@ -668,6 +670,7 @@ export default function Home() {
   const [goals, setGoals] = useState<Goals>({ weekly: 20, monthly: 80 });
   const [exams, setExams] = useState<ExamSettings[]>([]);
   const [pointAwards, setPointAwards] = useState<PointAward[]>([]);
+  const [pointChartRange, setPointChartRange] = useState<PointChartRange>("90");
   const [pointDays, setPointDays] = useState<string[]>([]);
   const [studyEvents, setStudyEvents] = useState<StudyEvent[]>([]);
   const [timedRewardState, setTimedRewardState] = useState<TimedRewardState>({ solvedProgress: 0, rewards: [] });
@@ -982,6 +985,49 @@ export default function Home() {
   const exerciseSolved = allExerciseRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
   const readingCompleted = allReadingRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
+  const pointChart = useMemo(() => {
+    const chartNow = new Date(clock);
+    const byDate = new Map<string, number>();
+    pointAwards.forEach((award) => {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(award.earnedOn)) {
+        byDate.set(award.earnedOn, (byDate.get(award.earnedOn) ?? 0) + award.points);
+      }
+    });
+
+    const dates = [...byDate.keys()].sort();
+    const rangeDays = pointChartRange === "all" ? null : Number(pointChartRange);
+    const earliest = dates[0] ? new Date(`${dates[0]}T12:00:00`) : chartNow;
+    const start = new Date(rangeDays ? chartNow.getTime() - (rangeDays - 1) * 86400000 : earliest.getTime());
+    start.setHours(12, 0, 0, 0);
+    const end = new Date(chartNow);
+    end.setHours(12, 0, 0, 0);
+    const naturalDayCount = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+    if (naturalDayCount < 2) start.setDate(start.getDate() - (2 - naturalDayCount));
+    const startKey = localDateKey(start);
+    const beforeRange = dates.filter((date) => date < startKey).reduce((sum, date) => sum + (byDate.get(date) ?? 0), 0);
+    const dayCount = Math.max(2, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
+    const points = Array.from({ length: dayCount }, (_, index) => {
+      const date = new Date(start);
+      date.setDate(start.getDate() + index);
+      const key = localDateKey(date);
+      const gained = byDate.get(key) ?? 0;
+      const total = beforeRange + dates.filter((dateKey) => dateKey >= startKey && dateKey <= key).reduce((sum, dateKey) => sum + (byDate.get(dateKey) ?? 0), 0);
+      return { key, date, total, gained };
+    });
+    const max = Math.max(studyPoints, ...points.map((point) => point.total), 1);
+    const width = 720;
+    const height = 220;
+    const padding = { top: 20, right: 16, bottom: 31, left: 48 };
+    const innerWidth = width - padding.left - padding.right;
+    const innerHeight = height - padding.top - padding.bottom;
+    const plotPoints = points.map((point, index) => ({
+      ...point,
+      x: padding.left + (index / (points.length - 1)) * innerWidth,
+      y: padding.top + innerHeight - (point.total / max) * innerHeight,
+    }));
+    const path = plotPoints.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+    return { height, width, padding, innerHeight, innerWidth, max, path, points: plotPoints, start, end };
+  }, [clock, pointAwards, pointChartRange, studyPoints]);
   const overall = activeMaterials.length
     ? Math.round(activeMaterials.reduce((sum, material) => sum + materialPct(material), 0) / activeMaterials.length)
     : 0;
@@ -1600,6 +1646,34 @@ export default function Home() {
           <span className="brand-mark">Σ</span>
           <span>MATH MAP</span>
         </div>
+        <button
+          className="mobile-menu-button"
+          type="button"
+          aria-label={`教材「${current.title}」のメニューを${mobileMenuOpen ? "閉じる" : "開く"}`}
+          aria-expanded={mobileMenuOpen}
+          aria-controls="mobile-material-menu"
+          onClick={() => setMobileMenuOpen((open) => !open)}
+        >
+          <span aria-hidden="true">☰</span>
+          <small>{current.title}</small>
+        </button>
+        {mobileMenuOpen && (
+          <div className="mobile-menu" id="mobile-material-menu">
+            <p>教材を切り替える</p>
+            {activeMaterials.map((material) => (
+              <button
+                key={material.id}
+                className={`material-link ${selected === material.id ? "selected" : ""}`}
+                onClick={() => { setSelected(material.id); setView("home"); setMobileMenuOpen(false); }}
+              >
+                <i style={{ background: material.color }} />
+                <span>{material.title}</span>
+                <small>{materialPct(material)}%</small>
+              </button>
+            ))}
+            <button className="add-link" onClick={() => { openAdd(); setMobileMenuOpen(false); }}>＋ 教材を追加</button>
+          </div>
+        )}
         <nav className="main-nav" aria-label="メインナビゲーション">
           <button className={`nav-item ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}><span>⌂</span>ホーム</button>
           <button className={`nav-item ${view === "materials" ? "active" : ""}`} onClick={() => setView("materials")}><span>▦</span>教材一覧</button>
@@ -1748,6 +1822,39 @@ export default function Home() {
                 <span>学習記録と目標達成に応じて加算</span>
               </article>
             </div>
+            <section className="point-chart-section" aria-labelledby="point-chart-title">
+              <div className="section-heading">
+                <div><p className="eyebrow">POINT HISTORY</p><h3 id="point-chart-title">累計ポイントの推移</h3></div>
+                <div className="point-chart-range" aria-label="表示期間">
+                  {(["30", "90", "all"] as PointChartRange[]).map((range) => (
+                    <button key={range} className={pointChartRange === range ? "active" : ""} onClick={() => setPointChartRange(range)}>
+                      {range === "all" ? "すべて" : `${range}日`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <article className="point-chart-card">
+                <div className="point-chart-summary">
+                  <div><strong>{studyPoints}<small> pt</small></strong><span>現在の累計</span></div>
+                  <p>{pointChart.start.getFullYear()}年{pointChart.start.getMonth() + 1}月{pointChart.start.getDate()}日 〜 {pointChart.end.getMonth() + 1}月{pointChart.end.getDate()}日</p>
+                </div>
+                <div className="point-chart-scroll">
+                  <svg className="point-chart" viewBox={`0 0 ${pointChart.width} ${pointChart.height}`} role="img" aria-label={`累計ポイント ${studyPoints}ポイントの推移グラフ`}>
+                    {[0, 1, 2, 3, 4].map((step) => {
+                      const value = Math.round(pointChart.max * (1 - step / 4));
+                      const y = pointChart.padding.top + pointChart.innerHeight * (step / 4);
+                      return <g key={step}><line x1={pointChart.padding.left} x2={pointChart.width - pointChart.padding.right} y1={y} y2={y} /><text x={pointChart.padding.left - 9} y={y + 4}>{value}</text></g>;
+                    })}
+                    <path className="point-chart-area" d={`${pointChart.path} L${pointChart.points.at(-1)?.x},${pointChart.padding.top + pointChart.innerHeight} L${pointChart.points[0]?.x},${pointChart.padding.top + pointChart.innerHeight} Z`} />
+                    <path className="point-chart-line" d={pointChart.path} />
+                    {pointChart.points.filter((point) => point.gained > 0).map((point) => <circle key={point.key} cx={point.x} cy={point.y} r="4"><title>{`${formatHeatDate(point.date)}：+${point.gained} pt、累計 ${point.total} pt`}</title></circle>)}
+                    <text className="point-chart-date" x={pointChart.padding.left} y={pointChart.height - 8}>{formatHeatDate(pointChart.start)}</text>
+                    <text className="point-chart-date" x={pointChart.width - pointChart.padding.right} y={pointChart.height - 8} textAnchor="end">{formatHeatDate(pointChart.end)}</text>
+                  </svg>
+                </div>
+                <p className="point-chart-note">点に触れると、その日に獲得したポイントと累計を確認できます。</p>
+              </article>
+            </section>
             <section className="point-rules-section">
               <div className="section-heading"><div><p className="eyebrow">POINT RULES</p><h3>ポイントの加算条件</h3></div><span>同じ記録からの重複加算はありません</span></div>
               <div className="point-rules">
