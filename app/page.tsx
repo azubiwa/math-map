@@ -653,6 +653,7 @@ export default function Home() {
   const [filter, setFilter] = useState<ProblemFilter>("all");
   const [view, setView] = useState<View>("home");
   const [dark, setDark] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
@@ -1600,6 +1601,34 @@ export default function Home() {
           <span className="brand-mark">Σ</span>
           <span>MATH MAP</span>
         </div>
+        <button
+          className="mobile-menu-button"
+          type="button"
+          aria-label="教材メニューを開く"
+          aria-expanded={mobileMenuOpen}
+          aria-controls="mobile-material-menu"
+          onClick={() => setMobileMenuOpen((open) => !open)}
+        >
+          <span aria-hidden="true">☰</span>
+          <small>{current.title}</small>
+        </button>
+        {mobileMenuOpen && (
+          <div className="mobile-menu" id="mobile-material-menu">
+            <p>教材を切り替える</p>
+            {activeMaterials.map((material) => (
+              <button
+                key={material.id}
+                className={`material-link ${selected === material.id ? "selected" : ""}`}
+                onClick={() => { setSelected(material.id); setView("home"); setMobileMenuOpen(false); }}
+              >
+                <i style={{ background: material.color }} />
+                <span>{material.title}</span>
+                <small>{materialPct(material)}%</small>
+              </button>
+            ))}
+            <button className="add-link" onClick={() => { openAdd(); setMobileMenuOpen(false); }}>＋ 教材を追加</button>
+          </div>
+        )}
         <nav className="main-nav" aria-label="メインナビゲーション">
           <button className={`nav-item ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}><span>⌂</span>ホーム</button>
           <button className={`nav-item ${view === "materials" ? "active" : ""}`} onClick={() => setView("materials")}><span>▦</span>教材一覧</button>
