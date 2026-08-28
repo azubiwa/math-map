@@ -233,6 +233,26 @@ button { color: inherit; }
 .point-card strong { font: 700 38px/1 Georgia, serif; }
 .point-card strong small { color: var(--muted); font: 10px "MathMap UDDigital", sans-serif; }
 .point-card > span:last-child { color: var(--muted); font-size: 8px; margin-top: 12px; }
+.point-chart-section { margin-top: 25px; }
+.point-chart-range { display: inline-flex; gap: 3px; padding: 3px; border-radius: 8px; background: var(--line); }
+.point-chart-range button { border: 0; border-radius: 6px; background: transparent; color: var(--muted); padding: 5px 9px; font-size: 9px; font-weight: 700; cursor: pointer; }
+.point-chart-range button.active { background: var(--card); color: var(--ink); box-shadow: 0 1px 4px rgba(12,35,66,.12); }
+.point-chart-card { padding: 19px 21px 13px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+.point-chart-summary { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding-bottom: 12px; }
+.point-chart-summary > div { display: flex; align-items: baseline; gap: 8px; }
+.point-chart-summary strong { font: 700 25px/1 Georgia, serif; font-variant-numeric: tabular-nums; }
+.point-chart-summary strong small { color: var(--muted); font: 10px "MathMap UDDigital", sans-serif; }
+.point-chart-summary span, .point-chart-summary p, .point-chart-note { color: var(--muted); font-size: 9px; }
+.point-chart-summary p, .point-chart-note { margin: 0; }
+.point-chart-scroll { width: 100%; overflow-x: auto; }
+.point-chart { display: block; min-width: 520px; width: 100%; overflow: visible; }
+.point-chart line { stroke: var(--line); stroke-width: 1; }
+.point-chart text { fill: var(--muted); font-size: 9px; }
+.point-chart-area { fill: color-mix(in srgb, var(--accent) 14%, transparent); }
+.point-chart-line { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.point-chart circle { fill: var(--card); stroke: var(--accent); stroke-width: 3; cursor: help; }
+.point-chart circle:hover { fill: var(--accent); }
+.point-chart-note { padding: 4px 0 0 48px; }
 .point-rules-section { margin-top: 25px; }
 .point-rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 9px; }
 .point-rules article { display: flex; align-items: center; gap: 10px; min-height: 72px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
@@ -411,6 +431,8 @@ button { color: inherit; }
   .goal-inputs { grid-template-columns: 1fr; }
   .goal-layout { grid-template-columns: 1fr; }
   .goal-layout .settings-card { grid-column: auto; }
+  .point-chart-summary { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .point-chart-note { padding-left: 0; }
   .point-rules { grid-template-columns: 1fr; }
   .sync-control-buttons { grid-template-columns: 1fr; }
   .point-toast { right: 20px; bottom: 20px; }
