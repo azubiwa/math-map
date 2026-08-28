@@ -17,6 +17,15 @@ test("exports Math Map", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 
+test("exports touch icon and web app manifest", async () => {
+  const html = await readFile(new URL("../out/index.html", import.meta.url), "utf8");
+  const manifest = await readFile(new URL("../out/manifest.webmanifest", import.meta.url), "utf8");
+  assert.match(html, /rel="apple-touch-icon"[^>]*apple-touch-icon\.png/i);
+  assert.match(html, /rel="manifest"[^>]*manifest\.webmanifest/i);
+  assert.match(manifest, /"src":"android-chrome-192x192\.png"/);
+  assert.match(manifest, /"src":"android-chrome-512x512\.png"/);
+});
+
 test("supports reading and exercise tracks in one material", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /記録する内容/);
