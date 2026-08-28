@@ -1649,7 +1649,7 @@ export default function Home() {
         <button
           className="mobile-menu-button"
           type="button"
-          aria-label="教材メニューを開く"
+          aria-label={`教材「${current.title}」のメニューを${mobileMenuOpen ? "閉じる" : "開く"}`}
           aria-expanded={mobileMenuOpen}
           aria-controls="mobile-material-menu"
           onClick={() => setMobileMenuOpen((open) => !open)}
