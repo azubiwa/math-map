@@ -14,6 +14,13 @@ type ProblemState = {
 };
 type Problem = ProblemState & { id: number; rounds?: Record<string, ProblemState> };
 type Chapter = { id: string; title: string; problems: Problem[]; readingItems?: Problem[] };
+type FinishGoal = {
+  dueDate: string;
+  mode: StudyMode;
+  round: number;
+  chapterId?: string;
+  itemId?: number;
+};
 type Material = {
   id: string;
   title: string;
@@ -34,6 +41,7 @@ type Material = {
   archived?: boolean;
   roundCount?: number;
   activeRound?: number;
+  finishGoal?: FinishGoal;
 };
 type View = "home" | "materials" | "history" | "goals" | "exam";
 type ProblemFilter = Status | "all";
@@ -72,6 +80,16 @@ const timedRewardDelayMs = 3 * 60 * 60 * 1000;
 const timedRewardWindowMs = 24 * 60 * 60 * 1000;
 const exerciseCompletionPoints = 2;
 const readingCompletionPoints = 5;
+
+function dateKeyWithOffset(offset: number, date = new Date()) {
+  const target = new Date(date);
+  target.setHours(12, 0, 0, 0);
+  target.setDate(target.getDate() + offset);
+  const year = target.getFullYear();
+  const month = String(target.getMonth() + 1).padStart(2, "0");
+  const day = String(target.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
 const streakBonuses: Record<number, number> = {
   3: 3,
@@ -162,6 +180,7 @@ function getCompletionLabel(material: Material, mode = getStudyMode(material)) {
 }
 
 const linearSeedStatuses: Status[] = ["solved", "solved", "with-answer", "solved", "todo", "trying", "solved", "todo", "todo", "with-answer", "solved", "todo", "solved", "todo"];
+const seedBaseDate = new Date("2026-08-28T12:00:00+09:00");
 
 const seed: Material[] = [
   {
@@ -171,6 +190,7 @@ const seed: Material[] = [
     color: "#3b82f6",
     studyMode: "exercise",
     unit: "問",
+    finishGoal: { dueDate: dateKeyWithOffset(42, seedBaseDate), mode: "exercise", round: 1 },
     chapters: [
       {
         id: "l1",
@@ -178,6 +198,7 @@ const seed: Material[] = [
         problems: linearSeedStatuses.map((status, i) => ({
           id: i + 1,
           status,
+          studiedOn: status === "todo" ? undefined : dateKeyWithOffset(-Math.floor(i / 3), seedBaseDate),
         })),
       },
       {
@@ -186,6 +207,7 @@ const seed: Material[] = [
         problems: Array.from({ length: 12 }, (_, i) => ({
           id: i + 1,
           status: i < 4 ? "solved" : i === 4 ? "trying" : "todo",
+          studiedOn: i <= 4 ? dateKeyWithOffset(-Math.floor(i / 2) - 1, seedBaseDate) : undefined,
         })),
       },
       {
@@ -212,9 +234,9 @@ const seed: Material[] = [
         problems: Array.from({ length: 10 }, (_, i) => ({
           id: i + 1,
           ...(i < 6
-            ? { status: "solved" as Status }
+            ? { status: "solved" as Status, studiedOn: dateKeyWithOffset(-Math.floor(i / 2), seedBaseDate) }
             : i === 6
-              ? { status: "solved" as Status }
+              ? { status: "solved" as Status, studiedOn: dateKeyWithOffset(-3, seedBaseDate) }
               : { status: "todo" as Status }),
         })),
       },
@@ -241,10 +263,7 @@ const seed: Material[] = [
 ];
 
 function localDateKey(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return dateKeyWithOffset(0, date);
 }
 
 function formatHeatDate(date: Date) {
@@ -366,7 +385,7 @@ function normalizeMaterials(value: unknown): Material[] | null {
           readingItems,
         };
       });
-      return {
+      const normalizedMaterial: Material = {
         ...candidate,
         id: typeof candidate.id === "string" ? candidate.id : `material-${materialIndex}`,
         title: typeof candidate.title === "string" ? candidate.title : `教材 ${materialIndex + 1}`,
@@ -385,6 +404,31 @@ function normalizeMaterials(value: unknown): Material[] | null {
         readingActiveRound: candidate.readingActiveRound ?? (studyMode === "reading" ? candidate.activeRound : undefined),
         chapters,
       };
+      const rawFinishGoal = candidate.finishGoal && typeof candidate.finishGoal === "object"
+        ? candidate.finishGoal as Partial<FinishGoal>
+        : null;
+      if (rawFinishGoal && /^\d{4}-\d{2}-\d{2}$/.test(rawFinishGoal.dueDate ?? "")) {
+        const goalMode: StudyMode = rawFinishGoal.mode === "reading" && readingEnabled
+          ? "reading"
+          : rawFinishGoal.mode === "exercise" && exerciseEnabled
+            ? "exercise"
+            : activeTrack;
+        const roundCount = getRoundCount(normalizedMaterial, goalMode);
+        const chapter = chapters.find((item) => item.id === rawFinishGoal.chapterId);
+        const item = chapter && typeof rawFinishGoal.itemId === "number"
+          ? getChapterItems(chapter, goalMode).find((problem) => problem.id === rawFinishGoal.itemId)
+          : undefined;
+        normalizedMaterial.finishGoal = {
+          dueDate: rawFinishGoal.dueDate!,
+          mode: goalMode,
+          round: Math.min(roundCount, Math.max(1, Number(rawFinishGoal.round) || 1)),
+          chapterId: chapter?.id,
+          itemId: item?.id,
+        };
+      } else {
+        normalizedMaterial.finishGoal = undefined;
+      }
+      return normalizedMaterial;
     });
   } catch {
     return null;
@@ -404,6 +448,106 @@ function materialPct(material: Material) {
   const modes = getEnabledModes(material);
   if (modes.length === 0) return 0;
   return Math.round(modes.reduce((sum, mode) => sum + pct(material.chapters, getActiveRound(material, mode), mode), 0) / modes.length);
+}
+
+function goalItems(material: Material, goal: Pick<FinishGoal, "mode" | "round" | "chapterId" | "itemId">) {
+  const chapterIndex = goal.chapterId
+    ? material.chapters.findIndex((chapter) => chapter.id === goal.chapterId)
+    : material.chapters.length - 1;
+  const lastChapterIndex = chapterIndex >= 0 ? chapterIndex : material.chapters.length - 1;
+  return material.chapters.slice(0, lastChapterIndex + 1).flatMap((chapter, index) => {
+    const items = getChapterItems(chapter, goal.mode);
+    if (index !== lastChapterIndex || goal.itemId === undefined) return items;
+    const itemIndex = items.findIndex((problem) => problem.id === goal.itemId);
+    return itemIndex >= 0 ? items.slice(0, itemIndex + 1) : items;
+  });
+}
+
+function finishTargetLabel(material: Material, goal: Pick<FinishGoal, "mode" | "chapterId" | "itemId">) {
+  const chapter = goal.chapterId ? material.chapters.find((item) => item.id === goal.chapterId) : undefined;
+  if (!chapter) return "この教材を完走";
+  if (goal.itemId === undefined) return `${chapter.title}まで完了`;
+  return `${chapter.title}の${goal.itemId}${getStudyUnit(material, goal.mode)}まで完了`;
+}
+
+function formatJapaneseDate(dateKey: string, includeYear = false) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  return new Intl.DateTimeFormat("ja-JP", includeYear
+    ? { year: "numeric", month: "long", day: "numeric" }
+    : { month: "long", day: "numeric" }).format(date);
+}
+
+function getFinishInsight(material: Material, studyEvents: StudyEvent[], today: Date) {
+  const todayKey = localDateKey(today);
+  const savedGoal = material.finishGoal;
+  const goal: FinishGoal = savedGoal ?? {
+    dueDate: "",
+    mode: getStudyMode(material),
+    round: getActiveRound(material),
+  };
+  const items = goalItems(material, goal);
+  const done = items.filter((problem) => isSolvedStatus(getProblemState(problem, goal.round).status)).length;
+  const remaining = Math.max(0, items.length - done);
+  const lookbackDays = 14;
+  const recentStart = dateKeyWithOffset(-(lookbackDays - 1), today);
+  const modePart = goal.mode === getPrimaryMode(material) ? "" : `:${goal.mode}`;
+  const eventPrefix = `${material.id}${modePart}:${goal.round}:`;
+  const recentSolveEvents = studyEvents.filter((event) => event.type === "solve"
+    && Boolean(event.problemKey?.startsWith(eventPrefix))
+    && event.date >= recentStart
+    && event.date <= todayKey);
+  const recentFallbackItems = material.chapters
+    .flatMap((chapter) => getChapterItems(chapter, goal.mode))
+    .map((problem) => getProblemState(problem, goal.round))
+    .filter((state) => isSolvedStatus(state.status)
+      && Boolean(state.studiedOn)
+      && state.studiedOn! >= recentStart
+      && state.studiedOn! <= todayKey);
+  const recentCount = recentSolveEvents.length > 0 ? recentSolveEvents.length : recentFallbackItems.length;
+  const recentDates = recentSolveEvents.length > 0
+    ? recentSolveEvents.map((event) => event.date)
+    : recentFallbackItems.flatMap((state) => state.studiedOn ? [state.studiedOn] : []);
+  const recentActiveDays = new Set(recentDates).size;
+  const recentDaily = recentCount / lookbackDays;
+  const recentStudyDayPace = recentActiveDays > 0 ? recentCount / recentActiveDays : 0;
+  const estimatedDays = recentDaily > 0 ? Math.ceil(remaining / recentDaily) : null;
+  const projectedDate = estimatedDays === null ? null : dateKeyWithOffset(estimatedDays, today);
+  const daysUntilDue = savedGoal ? daysBetween(todayKey, savedGoal.dueDate) : null;
+  const availableDays = daysUntilDue === null ? null : Math.max(1, daysUntilDue + 1);
+  const requiredDaily = availableDays === null ? null : remaining / availableDays;
+  const slackDays = projectedDate && savedGoal ? daysBetween(projectedDate, savedGoal.dueDate) : null;
+  const requiredStudyDaysPerWeek = requiredDaily !== null && recentStudyDayPace > 0
+    ? Math.ceil((requiredDaily * 7) / recentStudyDayPace)
+    : null;
+  const status = remaining === 0
+    ? "complete"
+    : daysUntilDue !== null && daysUntilDue < 0
+      ? "overdue"
+      : recentDaily === 0
+        ? "waiting"
+        : slackDays !== null && slackDays >= 0
+          ? "on-track"
+          : "behind";
+  return {
+    goal: savedGoal,
+    mode: goal.mode,
+    round: goal.round,
+    total: items.length,
+    done,
+    remaining,
+    progress: items.length > 0 ? Math.round((done / items.length) * 100) : 0,
+    recentDaily,
+    recentActiveDays,
+    recentStudyDayPace,
+    estimatedDays,
+    projectedDate,
+    daysUntilDue,
+    requiredDaily,
+    slackDays,
+    requiredStudyDaysPerWeek,
+    targetLabel: finishTargetLabel(material, goal),
+    status,
+  };
 }
 
 function trackAwardId(material: Material, mode: StudyMode, round: number, chapterId: string, itemId?: number) {
@@ -663,6 +807,13 @@ export default function Home() {
   const [newReadingEnabled, setNewReadingEnabled] = useState(false);
   const [newExerciseUnit, setNewExerciseUnit] = useState<StudyUnit>("問");
   const [newReadingUnit, setNewReadingUnit] = useState<StudyUnit>("節");
+  const [finishGoalOpen, setFinishGoalOpen] = useState(false);
+  const [finishGoalMaterialId, setFinishGoalMaterialId] = useState("");
+  const [finishGoalDate, setFinishGoalDate] = useState("");
+  const [finishGoalMode, setFinishGoalMode] = useState<StudyMode>("exercise");
+  const [finishGoalRound, setFinishGoalRound] = useState(1);
+  const [finishGoalChapterId, setFinishGoalChapterId] = useState("");
+  const [finishGoalItemId, setFinishGoalItemId] = useState("");
   const [chapterDrafts, setChapterDrafts] = useState<ChapterDraft[]>([
     { title: "第1章", exerciseCount: 10, readingCount: 0 },
   ]);
@@ -675,7 +826,7 @@ export default function Home() {
   const [studyEvents, setStudyEvents] = useState<StudyEvent[]>([]);
   const [timedRewardState, setTimedRewardState] = useState<TimedRewardState>({ solvedProgress: 0, rewards: [] });
   const [pointToast, setPointToast] = useState("");
-  const [clock, setClock] = useState(() => Date.now());
+  const [clock, setClock] = useState(0);
   const [restored, setRestored] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncEmail, setSyncEmail] = useState("");
@@ -689,7 +840,7 @@ export default function Home() {
   const skipNextCloudPush = useRef(false);
   const lastSyncedAtRef = useRef("");
   const latestSnapshotRef = useRef<StudySnapshot>({
-    version: 13,
+    version: 14,
     exportedAt: new Date().toISOString(),
     materials: seed,
     activity: {},
@@ -716,7 +867,7 @@ export default function Home() {
 
   useEffect(() => {
     latestSnapshotRef.current = {
-      version: 13,
+      version: 14,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -949,6 +1100,7 @@ export default function Home() {
   }, [applyStudySnapshot, syncStatus, syncUserId]);
 
   useEffect(() => {
+    setClock(Date.now());
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
@@ -964,8 +1116,10 @@ export default function Home() {
   const current = materials.find((m) => m.id === selected) ?? activeMaterials[0] ?? materials[0];
   const currentMode = current ? getStudyMode(current) : "exercise";
   const currentRound = current ? getActiveRound(current, currentMode) : 1;
-  const now = new Date(clock);
+  const now = clock === 0 ? new Date(2026, 7, 28, 12, 0, 0, 0) : new Date(clock);
+  const clockTime = clock || now.getTime();
   const todayKey = localDateKey(now);
+  const currentFinishInsight = current ? getFinishInsight(current, studyEvents, now) : null;
   const totalProblems = activeMaterials.flatMap((material) => {
     return getEnabledModes(material).flatMap((mode) => {
       const round = getActiveRound(material, mode);
@@ -986,7 +1140,7 @@ export default function Home() {
   const readingCompleted = allReadingRoundProblems.filter((problem) => isSolvedStatus(problem.status)).length;
   const studyPoints = pointAwards.reduce((sum, award) => sum + award.points, 0);
   const pointChart = useMemo(() => {
-    const chartNow = new Date(clock);
+    const chartNow = new Date(clockTime);
     const byDate = new Map<string, number>();
     pointAwards.forEach((award) => {
       if (/^\d{4}-\d{2}-\d{2}$/.test(award.earnedOn)) {
@@ -1027,7 +1181,7 @@ export default function Home() {
     }));
     const path = plotPoints.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
     return { height, width, padding, innerHeight, innerWidth, max, path, points: plotPoints, start, end };
-  }, [clock, pointAwards, pointChartRange, studyPoints]);
+  }, [clockTime, pointAwards, pointChartRange, studyPoints]);
   const overall = activeMaterials.length
     ? Math.round(activeMaterials.reduce((sum, material) => sum + materialPct(material), 0) / activeMaterials.length)
     : 0;
@@ -1059,9 +1213,9 @@ export default function Home() {
   const weekEndKey = localDateKey(weekEnd);
   const weeklyScore = weeklyEventScore(studyEvents, weekStartKey, weekEndKey);
   const weeklyCompleted = weeklyScore >= weeklyTarget;
-  const activeTimedRewards = timedRewardState.rewards.filter((reward) => new Date(reward.expiresAt).getTime() > clock);
-  const readyTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() <= clock);
-  const lockedTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() > clock);
+  const activeTimedRewards = timedRewardState.rewards.filter((reward) => new Date(reward.expiresAt).getTime() > clockTime);
+  const readyTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() <= clockTime);
+  const lockedTimedRewards = activeTimedRewards.filter((reward) => new Date(reward.unlockAt).getTime() > clockTime);
   const nextTimedReward = lockedTimedRewards[0];
   const completedRounds = activeMaterials.flatMap((material) =>
     getEnabledModes(material).flatMap((mode) =>
@@ -1178,14 +1332,14 @@ export default function Home() {
 
   const advanceTimedReward = () => {
     setTimedRewardState((state) => {
-      const rewards = state.rewards.filter((reward) => new Date(reward.expiresAt).getTime() > clock);
+      const rewards = state.rewards.filter((reward) => new Date(reward.expiresAt).getTime() > clockTime);
       const solvedProgress = state.solvedProgress + 1;
       if (solvedProgress < timedRewardRequiredSolves) return { solvedProgress, rewards };
-      const unlockAt = new Date(clock + timedRewardDelayMs);
+      const unlockAt = new Date(clockTime + timedRewardDelayMs);
       return {
         solvedProgress: solvedProgress - timedRewardRequiredSolves,
         rewards: [...rewards, {
-          id: `timed-${clock}-${rewards.length}`,
+          id: `timed-${clockTime}-${rewards.length}`,
           unlockAt: unlockAt.toISOString(),
           expiresAt: new Date(unlockAt.getTime() + timedRewardWindowMs).toISOString(),
         }],
@@ -1196,10 +1350,10 @@ export default function Home() {
   const claimTimedReward = (reward: TimedReward) => {
     const unlockTime = new Date(reward.unlockAt).getTime();
     const expiresTime = new Date(reward.expiresAt).getTime();
-    if (clock < unlockTime || clock >= expiresTime) return;
+    if (clockTime < unlockTime || clockTime >= expiresTime) return;
     setTimedRewardState((state) => ({
       ...state,
-      rewards: state.rewards.filter((item) => item.id !== reward.id && new Date(item.expiresAt).getTime() > clock),
+      rewards: state.rewards.filter((item) => item.id !== reward.id && new Date(item.expiresAt).getTime() > clockTime),
     }));
     grantPointAwards([{ key: `timed-reward:${reward.id}`, points: 15, label: "時限達成報酬を受領", earnedOn: todayKey }]);
   };
@@ -1359,6 +1513,45 @@ export default function Home() {
     setAdding(true);
   };
 
+  const openFinishGoal = (material: Material) => {
+    const saved = material.finishGoal;
+    const mode = saved?.mode ?? getStudyMode(material);
+    setFinishGoalMaterialId(material.id);
+    setFinishGoalDate(saved?.dueDate ?? dateKeyWithOffset(30, new Date(clockTime)));
+    setFinishGoalMode(mode);
+    setFinishGoalRound(saved?.round ?? getActiveRound(material, mode));
+    setFinishGoalChapterId(saved?.chapterId ?? "");
+    setFinishGoalItemId(saved?.itemId === undefined ? "" : String(saved.itemId));
+    setFinishGoalOpen(true);
+  };
+
+  const saveFinishGoal = () => {
+    const material = materials.find((item) => item.id === finishGoalMaterialId);
+    if (!material || !finishGoalDate) return;
+    const chapter = finishGoalChapterId
+      ? material.chapters.find((item) => item.id === finishGoalChapterId)
+      : undefined;
+    const itemId = chapter && finishGoalItemId ? Number(finishGoalItemId) : undefined;
+    setMaterials((items) => items.map((item) => item.id !== material.id ? item : {
+      ...item,
+      finishGoal: {
+        dueDate: finishGoalDate,
+        mode: finishGoalMode,
+        round: Math.min(getRoundCount(item, finishGoalMode), Math.max(1, finishGoalRound)),
+        chapterId: chapter?.id,
+        itemId: Number.isFinite(itemId) ? itemId : undefined,
+      },
+    }));
+    setFinishGoalOpen(false);
+  };
+
+  const removeFinishGoal = () => {
+    const material = materials.find((item) => item.id === finishGoalMaterialId);
+    if (!material?.finishGoal || !window.confirm("この完走目標を解除しますか？")) return;
+    setMaterials((items) => items.map((item) => item.id === material.id ? { ...item, finishGoal: undefined } : item));
+    setFinishGoalOpen(false);
+  };
+
   const saveMaterial = () => {
     const exerciseTotal = chapterDrafts.reduce((sum, chapter) => sum + chapter.exerciseCount, 0);
     const readingTotal = chapterDrafts.reduce((sum, chapter) => sum + chapter.readingCount, 0);
@@ -1459,7 +1652,7 @@ export default function Home() {
   };
 
   const addExam = () => {
-    const id = `exam-${clock}-${exams.length}`;
+    const id = `exam-${clockTime}-${exams.length}`;
     const material = activeMaterials[0];
     const mode = material && isTrackEnabled(material, "exercise") ? "exercise" : "reading";
     setExams((items) => [...items, { id, enabled: true, name: "", date: "", materialId: material?.id ?? "", round: material ? getActiveRound(material, mode) : 1 }]);
@@ -1572,7 +1765,7 @@ export default function Home() {
 
   const exportData = () => {
     const backup = {
-      version: 13,
+      version: 14,
       exportedAt: new Date().toISOString(),
       materials,
       activity,
@@ -1636,6 +1829,10 @@ export default function Home() {
       : syncUser && syncStatus === "synced"
         ? "同期済み"
         : "クラウド同期";
+
+  const finishGoalMaterial = materials.find((item) => item.id === finishGoalMaterialId);
+  const finishGoalChapter = finishGoalMaterial?.chapters.find((item) => item.id === finishGoalChapterId);
+  const finishGoalChapterItems = finishGoalChapter ? getChapterItems(finishGoalChapter, finishGoalMode) : [];
 
   if (!current) return null;
 
@@ -1734,6 +1931,7 @@ export default function Home() {
               {activeMaterials.map((material) => {
                 const modes = getEnabledModes(material);
                 const sourceIndex = materials.findIndex((item) => item.id === material.id);
+                const finishInsight = getFinishInsight(material, studyEvents, now);
                 return (
                   <article className="material-card" key={material.id}>
                     <button className="material-open" onClick={() => { setSelected(material.id); setView("home"); }}>
@@ -1750,6 +1948,22 @@ export default function Home() {
                         return <div className="track-progress-row" key={mode}><strong>{getTrackLabel(mode)} 第{getActiveRound(material, mode)}周・{progress}%</strong><div><i style={{ width: `${progress}%`, background: material.color }} /></div></div>;
                       })}
                     </div>
+                    <button className={`material-finish-glance ${finishInsight.status}`} onClick={() => { setSelected(material.id); setView("home"); }}>
+                      {finishInsight.goal ? <>
+                        <span>{formatJapaneseDate(finishInsight.goal.dueDate)}までに・{finishInsight.targetLabel}</span>
+                        <strong>{finishInsight.status === "complete"
+                          ? "目標達成です"
+                          : finishInsight.status === "on-track" && finishInsight.projectedDate
+                            ? `このペースなら ${formatJapaneseDate(finishInsight.projectedDate)}に達成`
+                            : `必要ペース 1日${(finishInsight.requiredDaily ?? 0).toFixed(1)}単位`}</strong>
+                      </> : <>
+                        <span>完走目標は未設定</span>
+                        <strong>{finishInsight.projectedDate
+                          ? `今のペースで ${formatJapaneseDate(finishInsight.projectedDate)}ごろに完走`
+                          : "期限を決めて、完走日を見える化"}</strong>
+                      </>}
+                      <i aria-hidden="true">→</i>
+                    </button>
                     <div className="material-actions">
                       <button className="secondary-button" onClick={() => moveMaterial(material.id, -1)} disabled={sourceIndex === 0} aria-label={`${material.title}を上へ移動`}>↑</button>
                       <button className="secondary-button" onClick={() => moveMaterial(material.id, 1)} disabled={sourceIndex === materials.length - 1} aria-label={`${material.title}を下へ移動`}>↓</button>
@@ -1932,7 +2146,76 @@ export default function Home() {
           </section>
         )}
 
-        {view === "home" && (<>
+        {view === "home" && currentFinishInsight && (<>
+        <section className={`finish-hero ${currentFinishInsight.status}`} aria-label={`${current.title}の完走見込み`}>
+          <div className="finish-hero-main">
+            <div className="finish-hero-heading">
+              <p className="eyebrow">FINISH FORECAST</p>
+              <span className="finish-status">{currentFinishInsight.status === "complete"
+                ? "目標達成"
+                : currentFinishInsight.status === "on-track"
+                  ? "順調です"
+                  : currentFinishInsight.status === "behind"
+                    ? "要ペース調整"
+                    : currentFinishInsight.status === "overdue"
+                      ? "期限を超過"
+                      : "記録待ち"}</span>
+            </div>
+            {currentFinishInsight.goal ? <>
+              <div className="finish-deadline"><strong>{formatJapaneseDate(currentFinishInsight.goal.dueDate)}</strong><span>までに</span></div>
+              <h2>「{current.title}」</h2>
+              <p className="finish-target">{currentFinishInsight.targetLabel}</p>
+            </> : <>
+              <div className="finish-deadline"><strong>完走日を決めよう</strong></div>
+              <h2>「{current.title}」</h2>
+              <p className="finish-target">期限と到達地点を決めると、毎日の必要ペースが分かります。</p>
+            </>}
+            <div className="finish-progress-copy">
+              <span>{getTrackLabel(currentFinishInsight.mode)}・第{currentFinishInsight.round}周</span>
+              <strong>{currentFinishInsight.done} / {currentFinishInsight.total}単位</strong>
+            </div>
+            <div className="finish-progress-track"><i style={{ width: `${currentFinishInsight.progress}%`, background: current.color }} /></div>
+          </div>
+          <aside className="pace-panel">
+            {currentFinishInsight.goal ? <>
+              <div className="pace-grid">
+                <div><span>必要ペース</span><strong>1日 <b>{currentFinishInsight.remaining === 0 ? "0.0" : Math.max(0.1, currentFinishInsight.requiredDaily ?? 0).toFixed(1)}</b>単位</strong></div>
+                <div><span>あなたの最近のペース</span><strong>{currentFinishInsight.recentDaily > 0 ? <>1日 <b>{currentFinishInsight.recentDaily.toFixed(1)}</b>単位</> : "まだ算出できません"}</strong></div>
+              </div>
+              <div className={`pace-verdict ${currentFinishInsight.status}`}>
+                <strong>{currentFinishInsight.status === "complete"
+                  ? "目標地点に到達しました"
+                  : currentFinishInsight.status === "on-track"
+                    ? "順調です"
+                    : currentFinishInsight.status === "behind"
+                      ? `あと1日${Math.max(0.1, (currentFinishInsight.requiredDaily ?? 0) - currentFinishInsight.recentDaily).toFixed(1)}単位増やすと間に合います`
+                      : currentFinishInsight.status === "overdue"
+                        ? "新しい期限を設定しましょう"
+                        : "次の学習からペースを算出します"}</strong>
+                {currentFinishInsight.status === "on-track" && currentFinishInsight.projectedDate && <p>
+                  このペースなら <b>{formatJapaneseDate(currentFinishInsight.projectedDate)}</b>に達成予定
+                  {currentFinishInsight.slackDays !== null && currentFinishInsight.slackDays > 0 && <span>{currentFinishInsight.slackDays}日分の余裕があります</span>}
+                </p>}
+                {currentFinishInsight.requiredStudyDaysPerWeek !== null && currentFinishInsight.requiredStudyDaysPerWeek > 0 && currentFinishInsight.requiredStudyDaysPerWeek <= 7 && currentFinishInsight.status !== "complete" && <p>
+                  最近の学習日と同じ量なら、<b>週{currentFinishInsight.requiredStudyDaysPerWeek}日</b>続ければ期限までに達成できます。
+                </p>}
+              </div>
+              <button className="finish-edit-button" onClick={() => openFinishGoal(current)}>目標を編集</button>
+            </> : <>
+              <div className="no-goal-forecast">
+                <span>現在の見込み</span>
+                {currentFinishInsight.projectedDate && currentFinishInsight.estimatedDays !== null ? <>
+                  <strong>1日 {currentFinishInsight.recentDaily.toFixed(1)}単位で、あと{currentFinishInsight.estimatedDays}日。</strong>
+                  <p>{formatJapaneseDate(currentFinishInsight.projectedDate)}ごろにこの教材を完走できます。</p>
+                </> : <>
+                  <strong>あと{currentFinishInsight.remaining}単位で完走</strong>
+                  <p>学習を記録すると、予想完走日が表示されます。</p>
+                </>}
+              </div>
+              <button className="primary-button wide" onClick={() => openFinishGoal(current)}>完走目標を設定</button>
+            </>}
+          </aside>
+        </section>
         <section className="summary">
           <article className="overall-card">
             <div className="ring" style={{ "--progress": `${overall * 3.6}deg` } as React.CSSProperties}>
@@ -1983,7 +2266,7 @@ export default function Home() {
           <article className={`time-card ${weeklyCompleted ? "complete" : ""}`}>
             <header><span>週間達成目標</span><strong>{Math.min(weeklyScore, weeklyTarget)}<small> / {weeklyTarget}</small></strong></header>
             <div className="time-progress"><i style={{ width: `${Math.min(100, Math.round((weeklyScore / weeklyTarget) * 100))}%` }} /></div>
-            <p>学習＋1・完了＋3<br />締切まで {formatRemaining(weekEnd.getTime() - clock)}</p>
+            <p>学習＋1・完了＋3<br />締切まで {formatRemaining(weekEnd.getTime() - clockTime)}</p>
             <em>{weeklyCompleted ? "完了済み・＋50 pt" : "完了時に＋50 pt"}</em>
           </article>
           <article className={`time-card ${readyTimedRewards.length > 0 ? "complete" : ""}`}>
@@ -1992,9 +2275,9 @@ export default function Home() {
               <strong>{readyTimedRewards.length > 0 ? readyTimedRewards.length : timedRewardState.solvedProgress}<small>{readyTimedRewards.length > 0 ? "件" : ` / ${timedRewardRequiredSolves}単位`}</small></strong>
             </header>
             <p>{readyTimedRewards.length > 0
-              ? `受取期限まで ${formatRemaining(new Date(readyTimedRewards[0].expiresAt).getTime() - clock)}`
+              ? `受取期限まで ${formatRemaining(new Date(readyTimedRewards[0].expiresAt).getTime() - clockTime)}`
               : nextTimedReward
-                ? `受取可能まで ${formatRemaining(new Date(nextTimedReward.unlockAt).getTime() - clock)}`
+                ? `受取可能まで ${formatRemaining(new Date(nextTimedReward.unlockAt).getTime() - clockTime)}`
                 : "5単位の初回完了で受取予定を設定"}</p>
             {readyTimedRewards.length > 0
               ? <button className="secondary-button" onClick={() => claimTimedReward(readyTimedRewards[0])}>＋15 ptを受け取る</button>
@@ -2147,6 +2430,45 @@ export default function Home() {
 
             {syncMessage && <p className="sync-message" role="status" aria-live="polite">{syncMessage}</p>}
             <p className="modal-note">クラウド同期を解除しても、この端末のデータとJSONバックアップ機能は残ります。</p>
+          </div>
+        </div>
+      )}
+
+      {finishGoalOpen && finishGoalMaterial && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setFinishGoalOpen(false)}>
+          <div className="modal finish-goal-modal" role="dialog" aria-modal="true" aria-labelledby="finish-goal-title" onMouseDown={(event) => event.stopPropagation()}>
+            <button className="modal-close" aria-label="閉じる" onClick={() => setFinishGoalOpen(false)}>×</button>
+            <p className="eyebrow">FINISH GOAL</p>
+            <h2 id="finish-goal-title">どこまで、いつまでに？</h2>
+            <p className="finish-goal-intro">「{finishGoalMaterial.title}」の到達地点を決めると、必要な学習ペースを毎日更新します。</p>
+            <div className="finish-goal-form">
+              <label>期限<input type="date" min={todayKey} value={finishGoalDate} onChange={(event) => setFinishGoalDate(event.target.value)} /></label>
+              <label>学習内容<select value={finishGoalMode} onChange={(event) => {
+                const mode = event.target.value as StudyMode;
+                setFinishGoalMode(mode);
+                setFinishGoalRound(getActiveRound(finishGoalMaterial, mode));
+                setFinishGoalChapterId("");
+                setFinishGoalItemId("");
+              }}>{getEnabledModes(finishGoalMaterial).map((mode) => <option value={mode} key={mode}>{getTrackLabel(mode)}</option>)}</select></label>
+              <label>対象の周<select value={finishGoalRound} onChange={(event) => setFinishGoalRound(Number(event.target.value))}>{Array.from({ length: getRoundCount(finishGoalMaterial, finishGoalMode) }, (_, index) => <option value={index + 1} key={index + 1}>第{index + 1}周</option>)}</select></label>
+              <label className="finish-goal-wide">到達地点<select value={finishGoalChapterId} onChange={(event) => { setFinishGoalChapterId(event.target.value); setFinishGoalItemId(""); }}>
+                <option value="">この教材の最後まで（完走）</option>
+                {finishGoalMaterial.chapters.filter((chapter) => getChapterItems(chapter, finishGoalMode).length > 0).map((chapter) => <option value={chapter.id} key={chapter.id}>{chapter.title}まで</option>)}
+              </select></label>
+              {finishGoalChapter && <label className="finish-goal-wide">章のどこまで<select value={finishGoalItemId} onChange={(event) => setFinishGoalItemId(event.target.value)}>
+                <option value="">章の最後まで</option>
+                {finishGoalChapterItems.map((problem) => <option value={problem.id} key={problem.id}>{problem.id}{getStudyUnit(finishGoalMaterial, finishGoalMode)}まで</option>)}
+              </select></label>}
+            </div>
+            <div className="finish-goal-preview">
+              <span>設定する目標</span>
+              <strong>{finishGoalDate ? `${formatJapaneseDate(finishGoalDate)}までに` : "期限を選んで"}</strong>
+              <p>{finishTargetLabel(finishGoalMaterial, { mode: finishGoalMode, chapterId: finishGoalChapterId || undefined, itemId: finishGoalItemId ? Number(finishGoalItemId) : undefined })}</p>
+            </div>
+            <div className="finish-goal-actions">
+              {finishGoalMaterial.finishGoal && <button className="danger-button" onClick={removeFinishGoal}>目標を解除</button>}
+              <button className="primary-button" disabled={!finishGoalDate} onClick={saveFinishGoal}>必要ペースを計算</button>
+            </div>
           </div>
         </div>
       )}
